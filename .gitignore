@@ -1,0 +1,10 @@
+data/
+cache/
+scraper/
+*.pbix
+*.pbit
+.env
+__pycache__/
+.ipynb_checkpoints/
+.pytest_cache/
+*.zip
