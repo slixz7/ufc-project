@@ -9,14 +9,36 @@
 --        one row per fighter per fight
 --
 -- Output views:
---   fighter_fights_enriched -> adds fight duration and KO/sub win flags
---   fighter_features        -> each fighter's stats using ONLY their earlier fights
---   model_rows              -> one row per fight: fighter A vs B, diffs, label
+--   fighter_fights_enriched     -> adds fight duration and KO/sub win flags
+--   fighter_fights_enriched_all -> the same, plus one placeholder row per fighter in each upcoming bout
+--   fighter_features_all        -> each fighter's stats using ONLY their earlier fights (real + upcoming rows)
+--   fighter_features            -> the real fights only (what the notebooks, model and Power BI use)
+--   model_rows                  -> one row per past fight: fighter A vs B, diffs, label
+--   upcoming_model_rows         -> one row per upcoming bout, same columns, no label
 -- Safe to re-run (drops and recreates the views).
 -- =====================================================================
 
+-- Announced-but-not-yet-fought bouts (loaded by pipeline/upcoming.py). Created here because the views below read it.
+CREATE TABLE IF NOT EXISTS upcoming_fights (
+    bout_id        TEXT PRIMARY KEY,
+    event_name     TEXT NOT NULL,
+    event_date     DATE NOT NULL,
+    bout_order     INTEGER,
+    weight_class   TEXT,
+    title_fight    BOOLEAN DEFAULT FALSE,
+    fighter_a_name TEXT NOT NULL,           -- name as listed on the card
+    fighter_a_url  TEXT NOT NULL,           -- dataset fighter_url, or 'new:<name>' for a fighter not in the dataset
+    fighter_b_name TEXT NOT NULL,
+    fighter_b_url  TEXT NOT NULL,
+    status         TEXT NOT NULL DEFAULT 'scheduled',   -- scheduled | cancelled
+    loaded_at      TIMESTAMPTZ DEFAULT now()
+);
+
+DROP VIEW IF EXISTS upcoming_model_rows;
 DROP VIEW IF EXISTS model_rows;
 DROP VIEW IF EXISTS fighter_features;
+DROP VIEW IF EXISTS fighter_features_all;
+DROP VIEW IF EXISTS fighter_fights_enriched_all;
 DROP VIEW IF EXISTS fighter_fights_enriched;
 
 -- ---------------------------------------------------------------------
@@ -40,12 +62,73 @@ FROM fighter_fights ff
 JOIN fights f USING (fight_url);
 
 -- ---------------------------------------------------------------------
+-- 1b. Real fights plus placeholder rows for upcoming bouts.
+--     A placeholder has no result and no stats, so the window functions below compute each
+--     fighter's features from all of their real fights BEFORE the event, exactly as they
+--     would be on fight night. Only bouts after the latest loaded event are included.
+-- ---------------------------------------------------------------------
+CREATE VIEW fighter_fights_enriched_all AS
+SELECT
+    fight_url,
+    fighter_url,
+    fighter_name,
+    side,
+    won,
+    sig_land,
+    sig_att,
+    td_land,
+    td_att,
+    sub_att,
+    kd,
+    ctrl_sec,
+    dist_att,
+    clinch_att,
+    ground_att,
+    sig_absorbed,
+    opp_td_land,
+    opp_td_att,
+    height_cm,
+    reach_cm,
+    stance,
+    dob,
+    event_date,
+    event_name,
+    weight_class,
+    title_fight,
+    num_rounds,
+    result,
+    dur_sec,
+    ko_win,
+    sub_win
+FROM fighter_fights_enriched
+UNION ALL
+SELECT
+    'upcoming:' || u.bout_id,
+    s.fighter_url, s.fighter_name, s.side,
+    NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+    NULL, NULL, NULL, NULL, NULL, NULL,
+    a.height_cm, a.reach_cm, a.stance, a.dob,
+    u.event_date, u.event_name, u.weight_class, u.title_fight, NULL, NULL, NULL, NULL, NULL
+FROM upcoming_fights u
+CROSS JOIN LATERAL (VALUES (1, u.fighter_a_url, u.fighter_a_name),
+                           (2, u.fighter_b_url, u.fighter_b_name)) AS s(side, fighter_url, fighter_name)
+LEFT JOIN LATERAL (
+    SELECT ff.height_cm, ff.reach_cm, ff.stance, ff.dob
+    FROM fighter_fights ff JOIN fights f USING (fight_url)
+    WHERE ff.fighter_url = s.fighter_url
+    ORDER BY f.event_date DESC
+    LIMIT 1
+) a ON TRUE
+WHERE u.status = 'scheduled'
+  AND u.event_date > (SELECT MAX(event_date) FROM fights);
+
+-- ---------------------------------------------------------------------
 -- 2. Per-fighter features from PREVIOUS fights only
 --    Key idea: window frame  ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
 --    = every earlier fight of this fighter, never the current one.
 --    COLLATE "C" makes the tie-break order identical to Python's string sort.
 -- ---------------------------------------------------------------------
-CREATE VIEW fighter_features AS
+CREATE VIEW fighter_features_all AS
 WITH base AS (
     SELECT
         fight_url, fighter_url, fighter_name, side, event_date, won, ko_win, sub_win,
@@ -69,7 +152,7 @@ WITH base AS (
                            ORDER BY event_date, fight_url COLLATE "C") AS rn,
         ROW_NUMBER() OVER (PARTITION BY fighter_url, won
                            ORDER BY event_date, fight_url COLLATE "C") AS rn_same
-    FROM fighter_fights_enriched
+    FROM fighter_fights_enriched_all
 ),
 streaks AS (
     -- "Gaps and islands": rn - rn_same is constant within a run of identical results,
@@ -132,6 +215,10 @@ SELECT
     prev_ko_win::double precision  / NULLIF(n_prev, 0)                      AS ko_win_rate,
     prev_sub_win::double precision / NULLIF(n_prev, 0)                      AS sub_win_rate
 FROM agg;
+
+-- Real fights only: identical to the old fighter_features, so notebooks, the model and Power BI are unaffected.
+CREATE VIEW fighter_features AS
+SELECT * FROM fighter_features_all WHERE won IS NOT NULL;
 
 -- ---------------------------------------------------------------------
 -- 3. One row per fight, fighter A vs fighter B
@@ -222,3 +309,78 @@ JOIN fighter_features b ON b.fight_url = s.fight_url AND b.side = 3 - s.a_side
 JOIN (SELECT DISTINCT fight_url, weight_class, title_fight, num_rounds
       FROM fighter_fights_enriched) fe ON fe.fight_url = s.fight_url
 WHERE a.event_date >= DATE '2000-01-01';   -- skip 1994-1999 one-night tournaments
+
+-- ---------------------------------------------------------------------
+-- 4. One row per upcoming bout, with the same feature columns as model_rows.
+--    Fighter A is the first name listed on the card. The model is symmetric, so the order
+--    doesn't change the probabilities.
+-- ---------------------------------------------------------------------
+CREATE VIEW upcoming_model_rows AS
+SELECT
+    u.bout_id, u.event_name, u.event_date, u.bout_order, u.weight_class, u.title_fight,
+    u.fighter_a_name AS fighter_a,
+    u.fighter_b_name AS fighter_b,
+    LEAST(a.n_prev, b.n_prev) AS min_prev_fights,
+    a.n_prev AS a_n_prev,
+    a.prev_win_rate AS a_prev_win_rate,
+    a.last3_win_rate AS a_last3_win_rate,
+    a.streak AS a_streak,
+    a.days_since_last AS a_days_since_last,
+    a.age AS a_age,
+    a.height AS a_height,
+    a.reach AS a_reach,
+    a.slpm AS a_slpm,
+    a.sapm AS a_sapm,
+    a.sig_acc AS a_sig_acc,
+    a.td_per15 AS a_td_per15,
+    a.td_acc AS a_td_acc,
+    a.td_def AS a_td_def,
+    a.sub_att_per15 AS a_sub_att_per15,
+    a.kd_per15 AS a_kd_per15,
+    a.ctrl_share AS a_ctrl_share,
+    a.grappling_share AS a_grappling_share,
+    a.ko_win_rate AS a_ko_win_rate,
+    a.sub_win_rate AS a_sub_win_rate,
+    b.n_prev AS b_n_prev,
+    b.prev_win_rate AS b_prev_win_rate,
+    b.last3_win_rate AS b_last3_win_rate,
+    b.streak AS b_streak,
+    b.days_since_last AS b_days_since_last,
+    b.age AS b_age,
+    b.height AS b_height,
+    b.reach AS b_reach,
+    b.slpm AS b_slpm,
+    b.sapm AS b_sapm,
+    b.sig_acc AS b_sig_acc,
+    b.td_per15 AS b_td_per15,
+    b.td_acc AS b_td_acc,
+    b.td_def AS b_td_def,
+    b.sub_att_per15 AS b_sub_att_per15,
+    b.kd_per15 AS b_kd_per15,
+    b.ctrl_share AS b_ctrl_share,
+    b.grappling_share AS b_grappling_share,
+    b.ko_win_rate AS b_ko_win_rate,
+    b.sub_win_rate AS b_sub_win_rate,
+    a.n_prev - b.n_prev AS diff_n_prev,
+    a.prev_win_rate - b.prev_win_rate AS diff_prev_win_rate,
+    a.last3_win_rate - b.last3_win_rate AS diff_last3_win_rate,
+    a.streak - b.streak AS diff_streak,
+    a.days_since_last - b.days_since_last AS diff_days_since_last,
+    a.age - b.age AS diff_age,
+    a.height - b.height AS diff_height,
+    a.reach - b.reach AS diff_reach,
+    a.slpm - b.slpm AS diff_slpm,
+    a.sapm - b.sapm AS diff_sapm,
+    a.sig_acc - b.sig_acc AS diff_sig_acc,
+    a.td_per15 - b.td_per15 AS diff_td_per15,
+    a.td_acc - b.td_acc AS diff_td_acc,
+    a.td_def - b.td_def AS diff_td_def,
+    a.sub_att_per15 - b.sub_att_per15 AS diff_sub_att_per15,
+    a.kd_per15 - b.kd_per15 AS diff_kd_per15,
+    a.ctrl_share - b.ctrl_share AS diff_ctrl_share,
+    a.grappling_share - b.grappling_share AS diff_grappling_share,
+    a.ko_win_rate - b.ko_win_rate AS diff_ko_win_rate,
+    a.sub_win_rate - b.sub_win_rate AS diff_sub_win_rate
+FROM upcoming_fights u
+JOIN fighter_features_all a ON a.fight_url = 'upcoming:' || u.bout_id AND a.side = 1
+JOIN fighter_features_all b ON b.fight_url = 'upcoming:' || u.bout_id AND b.side = 2;

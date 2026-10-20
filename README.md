@@ -40,6 +40,7 @@ The Power BI file is not included (it contains a database address). `docs/powerb
 4. **Database** (`04_postgres_sql`): load the data into Postgres and rebuild the same features as **SQL window functions** (`sql/features.sql`), verified to match the pandas version exactly.
 5. **Scoring** (`pipeline/predict.py`): for each new fight, train on all earlier fights, predict, and log whether the pick was right (`sql/predictions.sql` defines the table and views Power BI reads).
 6. **Updating** (`pipeline/update_from_csv.py`): append new fights from the latest copy of the dataset.
+7. **Upcoming cards** (`pipeline/upcoming.py`): load an announced card from a CSV, compute each fighter's features as of fight night with the same SQL, make the prediction **before the event**, lock it with a timestamp, and grade it once the real result arrives. Late card changes (an opponent swap, a cancelled bout) are handled without touching predictions already made.
 
 ## Problems I found and fixed
 
@@ -51,7 +52,8 @@ The Power BI file is not included (it contains a database address). `docs/powerb
 
 ## Limitations
 
-- Predictions are currently made *as if before the card* (using only earlier data) but generated after the results are in. Predicting announced fights before they happen is the next step.
+- The scoreboard on the dashboard is still an *after-the-fact* backtest (every prediction uses only earlier data, but is generated after the result). The pre-fight pipeline (`upcoming.py`) builds a genuinely locked record from here on; cards are entered by hand because ufcstats.com can't be scraped.
+- Fighter names differ between sources (for example "Cameron" vs "Cam"), so new cards need a small name-matching step. It stops and shows suggestions rather than guessing.
 - History is UFC-only: a fighter's career before the UFC isn't in the data.
 - Only about 45% of fights have enough history to score.
 - The dataset has no betting odds, so there is no comparison against the market.
@@ -81,6 +83,15 @@ The Power BI file is not included (it contains a database address). `docs/powerb
    python pipeline/predict.py
    ```
 
+6. **Predict an announced card before it happens** (one-time `python pipeline/upcoming.py setup` first):
+   ```
+   python pipeline/upcoming.py load --csv upcoming/ufc-333.csv --dry-run
+   python pipeline/upcoming.py load --csv upcoming/ufc-333.csv
+   python pipeline/upcoming.py predict
+   ```
+   After the event, once the dataset includes it: run `update_from_csv.py` as above, then `python pipeline/upcoming.py grade`.
+   Names that don't match your data are listed with suggestions; add a line to `upcoming/aliases.csv` (use `NEW` for a fighter with no UFC history).
+
 Never commit a connection string. This repo's `.gitignore` excludes `data/`, `.env` and Power BI files.
 
 ## Project structure
@@ -94,12 +105,15 @@ sql/features.sql            feature views (window functions)
 sql/predictions.sql         prediction table and dashboard views
 pipeline/predict.py         score fights, log results
 pipeline/update_from_csv.py add new fights from the dataset
+pipeline/upcoming.py        predict announced cards before they happen, lock and grade them
+upcoming/ufc-333.csv        an example announced card
+upcoming/aliases.csv        card name -> dataset name fixes
 docs/powerbi_dashboard.md   how the dashboard is built
 ```
 
 ## Roadmap
 
-- Predictions for upcoming cards, locked before the event and graded afterwards.
+- Publish the pre-fight predictions and track record on a shareable page.
 - A shareable web app: browse past and upcoming events, compare fighters, see the model's pick.
 - Automated updates.
 

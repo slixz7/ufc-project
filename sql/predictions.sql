@@ -53,3 +53,29 @@ SELECT CASE WHEN confidence < 0.55 THEN '1) 50-55 pct'
        ROUND(AVG(correct::numeric), 3)   AS accuracy
 FROM fight_predictions
 GROUP BY 1;
+
+-- ---------------------------------------------------------------------
+-- Predictions for announced cards, made BEFORE the event and never overwritten.
+-- Written by pipeline/upcoming.py (predict), graded later (grade).
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS upcoming_predictions (
+    bout_id           TEXT PRIMARY KEY,
+    event_name        TEXT,
+    event_date        DATE,
+    bout_order        INTEGER,
+    weight_class      TEXT,
+    title_fight       BOOLEAN,
+    fighter_a         TEXT,
+    fighter_b         TEXT,
+    a_prior_fights    INTEGER,
+    b_prior_fights    INTEGER,
+    status            TEXT,               -- predicted | not_enough_history | cancelled | no_result
+    p_a_wins          DOUBLE PRECISION,   -- model probability that fighter A wins
+    predicted_winner  TEXT,
+    confidence        DOUBLE PRECISION,   -- probability of the predicted winner (0.5 to 1)
+    trained_on_fights INTEGER,
+    predicted_at      TIMESTAMPTZ DEFAULT now(),
+    actual_winner     TEXT,
+    correct           INTEGER,
+    graded_at         TIMESTAMPTZ
+);
