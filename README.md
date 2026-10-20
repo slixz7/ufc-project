@@ -1,195 +1,108 @@
-# Assignment 9: Memory Management
+# UFC Fight Predictor
 
-In this assignment you will implement a memory allocator that uses the memory management techniques
-discussed in class. `main.c` contains a main function that tests your allocator. `alloc.h` contains
-the definitions used for implementation and testing.
+Predicts UFC fight winners from each fighter's record, physical attributes, fighting style and recent form, then grades itself against the real results. Built end to end: **Python → PostgreSQL/SQL → logistic regression → Power BI**.
 
-Debugging in this assignment is going to be challenging. We highly recommend you to use `cgdb` to
-debug your program as you can readily inspect how you use the heap. Logging will not suffice. If you
-need to, go back to [A5](https://github.com/SFU-CMPT-201/a5) and review the `gdb` tutorial once
-again. You won't regret using `cgdb` for this assignment.
+> Not affiliated with the UFC. Model predictions for fun and learning, not betting advice.
 
-Before you start the assignment, make sure you `record`.
+![Scoreboard](docs/images/scoreboard.png)
+![Fight explorer](docs/images/fight-explorer.png)
 
-## Allocator Design Overview
+## Headline results
 
-There are two main functions that you need to implement defined in `alloc.h`.
+Evaluated only on fights where **both fighters had at least 3 earlier UFC fights** (about 45% of all fights), because features are unreliable for fighters with little history. Every prediction uses only data from before the event.
 
-```c
-/*
- * alloc() allocates memory from the heap. The first argument indicates the
- * size. It returns the pointer to the newly-allocated memory. It returns NULL
- * if there is not enough space.
- */
-void *alloc(int);
+| | Accuracy |
+|---|---|
+| Coin flip | 50.0% |
+| Pick the younger fighter | 59.9% |
+| Pick the fighter with the better career win rate | 61.8% |
+| **Logistic regression, test set Jan 2025 to Oct 2026 (516 fights)** | **67.2%** (about 63% to 71% interval) |
+| **Logistic regression, walk-forward 2016 to 2026 (2,740 fights)** | **62.8%** (single years range from about 57% to 69%) |
 
-/*
- * dealloc() frees the memory pointed to by the first argument.
- */
-void dealloc(void *);
+**How to read this honestly**
+- The recent test window was a good stretch. The long-run figure (about 63%) is the more representative one.
+- The model beats the simple "better record" rule by about 5 points on the test set, but the intervals overlap, so the edge is suggestive rather than proven.
+- Confidence carries information: in the live scoreboard, picks the model was at least 65% confident about were right about 74-75% of the time, versus roughly 60-64% for lower-confidence picks (a step up, not a smooth climb).
+- Fight outcomes are noisy. Published models for this problem typically land in the low-to-mid 60s.
+
+## What the dashboard shows
+
+- **Scoreboard:** running accuracy against a coin flip, accuracy by model confidence, last-event accuracy.
+- **Fight explorer:** every scored fight with the model's pick, its confidence and whether it was right, filterable by weight class and confidence.
+
+The Power BI file is not included (it contains a database address). `docs/powerbi_dashboard.md` explains how to rebuild it.
+
+## How it works
+
+1. **Clean** (`01_load_and_clean`): load the Kaggle dataset, drop fights with no winner, and randomise which fighter is "A" so the label isn't trivially "fighter 1".
+2. **Features** (`02_features`): rebuild each fighter's stats from their *earlier* fights only (rolling win rates, streaks, days since last fight, age, striking and grappling rates, style), then take the A-minus-B differences.
+3. **Model** (`03_model`): logistic regression with no intercept (swapping A and B should flip the prediction), tuned on a validation block, tested on later fights, compared against simple baselines and checked with a walk-forward evaluation.
+4. **Database** (`04_postgres_sql`): load the data into Postgres and rebuild the same features as **SQL window functions** (`sql/features.sql`), verified to match the pandas version exactly.
+5. **Scoring** (`pipeline/predict.py`): for each new fight, train on all earlier fights, predict, and log whether the pick was right (`sql/predictions.sql` defines the table and views Power BI reads).
+6. **Updating** (`pipeline/update_from_csv.py`): append new fights from the latest copy of the dataset.
+
+## Problems I found and fixed
+
+- **Career stats in the dataset are snapshots from scrape time, not from the day of the fight.** A veteran's career stats were identical in 2008 and 2026 rows, so using them would leak the future into the model. I rebuilt every rolling stat from earlier fights only and wrote a brute-force check that recomputes features the slow way for 300 random rows.
+- **The first fighter listed won every fight in the raw data.** A model would have learned "pick fighter 1" and scored a fake 100%.
+- **Early UFC events were one-night tournaments,** with the same fighter appearing up to three times on one date and no fight order. Those rows are kept as history but not used as training rows.
+- **A "reach unknown" flag looked significant but leaks information,** since a recorded reach depends partly on how long a fighter lasted in the UFC. Removing it didn't hurt accuracy, so it's out.
+- **ufcstats.com blocks plain HTTP scraping** behind a JavaScript check, so live scraping wasn't possible. Updates come from a maintained public dataset instead.
+
+## Limitations
+
+- Predictions are currently made *as if before the card* (using only earlier data) but generated after the results are in. Predicting announced fights before they happen is the next step.
+- History is UFC-only: a fighter's career before the UFC isn't in the data.
+- Only about 45% of fights have enough history to score.
+- The dataset has no betting odds, so there is no comparison against the market.
+- Small per-event samples: accuracy for a single card is very noisy.
+
+## Run it yourself
+
+1. Download the dataset from Kaggle (`scarekrow/ufc-data`) and put the fights CSV in `data/` (it is not included here; check its license on Kaggle).
+2. Install:
+   ```
+   pip install -r requirements.txt
+   pip install statsmodels jupyter matplotlib
+   ```
+3. Run notebooks `01`, `02` and `03` in order. They need no database.
+4. Create a PostgreSQL database (a free hosted one such as Neon works) and set the connection string. In PowerShell:
+   ```
+   $env:DATABASE_URL = "postgresql://USER:PASSWORD@HOST/DBNAME?sslmode=require"
+   ```
+   Then run notebook `04`, and:
+   ```
+   python pipeline/predict.py
+   ```
+5. After each new card, download the updated dataset into `data/new/` and run:
+   ```
+   python pipeline/update_from_csv.py --csv data/new --dry-run
+   python pipeline/update_from_csv.py --csv data/new
+   python pipeline/predict.py
+   ```
+
+Never commit a connection string. This repo's `.gitignore` excludes `data/`, `.env` and Power BI files.
+
+## Project structure
+
+```
+01_load_and_clean.ipynb     clean the raw data
+02_features.ipynb           leakage-free features
+03_model.ipynb              model and evaluation
+04_postgres_sql.ipynb       load into Postgres, rebuild features in SQL
+sql/features.sql            feature views (window functions)
+sql/predictions.sql         prediction table and dashboard views
+pipeline/predict.py         score fights, log results
+pipeline/update_from_csv.py add new fights from the dataset
+docs/powerbi_dashboard.md   how the dashboard is built
 ```
 
-They correspond to `malloc()` and `free()`. Your job is to implement these two functions that
-allocate and deallocate memory for a user program.
+## Roadmap
 
-In addition, there are two other functions that you need to implement that sets the parameters for
-your allocator and gathers the statistics.
+- Predictions for upcoming cards, locked before the event and graded afterwards.
+- A shareable web app: browse past and upcoming events, compare fighters, see the model's pick.
+- Automated updates.
 
-```c
-/*
- * allocopt() sets the options for the memory allocator.
- *
- * The first argument sets the algorithm. The second argument sets the size
- * limit.
- */
-void allocopt(enum algs, int);
+## Data and credits
 
-/*
- * allocinfo() returns the current statistics.
- */
-struct allocinfo allocinfo(void);
-```
-
-These functions are inspired by `mallopt()` and `mallinfo()` for `malloc()` that allow you to set
-the parameters for `malloc()` and gather statistics.
-
-`alloc.h` has additional definitions and data structures that you need to use for your
-implementation. Please check the source before you start implementing your allocator.
-
-Before starting this assignment, it is important to have a clear understanding of how memory
-management should work, which is discussed in class. Remember that `alloc()` and `dealloc()` work in
-tandem and are not two isolated features. They both rely on the linked list they jointly use.
-
-## `alloc()`
-
-A user program invokes `alloc()` to request a chunk of memory. It expects a single argument that
-indicates the memory block size being requested. It should return the pointer to a newly-allocated
-chunk. This is basically your own `malloc()`.
-
-Here are the requirements for your implementation.
-
-* Internally, you should use `sbrk()` (which increases the program break) to increase the size of
-  the heap. Keep in mind that using `sbrk()` means that you can't use `malloc()` as it also uses
-  `sbrk()`. This in turn means that you can't use any other functions that use `malloc()`. For
-  example, `printf()` uses `malloc()` internally but `write()` doesn't.
-* You should always increase the heap size by `INCREMENT` defined in `alloc.h`. In other words, you
-  should not increase the heap size arbitrarily. Instead, you should start by increasing the program
-  break by `INCREMENT` for the very first `alloc()` call. If your user program keeps requesting
-  memory and you run out of space, then and only then you should increase the program break again by
-  `INCREMENT`. A user program can use [`allocopt()`](#allocopt) described below to set the limit on
-  how much you can increase the heap size. You should only increase the program break by `INCREMENT`
-  if it is within the limit.
-* If you run out of space and can't increase the heap size (due to the limit), you should return
-  `NULL`.
-* If you allocate a block out of a free block, you should split it to create a new free block (as
-  discussed in class). The only exception is when, if you performed a split, the remaining size
-  would be equal to or less than the header size. If that is the case, you should *not* perform a
-  split and just return the entire free block to your user program.
-* A user program can use [`allocopt()`](#allocopt) to choose an allocation algorithm. `alloc.h`
-  defines the following options.
-
-  ```c
-  enum algs { FIRST_FIT, BEST_FIT, WORST_FIT };
-  ```
-
-  If a user program selects a particular option, you should allocate memory according to the
-  algorithm. As discussed in class, `FIRST_FIT` satisfies the allocation request from the first
-  available memory block (according to the linked list described in [`dealloc()`](#dealloc)) that is
-  at least as large as the requested size. `BEST_FIT` satisfies the allocation request from the
-  available memory block that is at least as large as the requested size and that results in the
-  smallest remainder fragment. `WORST_FIT` satisfies the allocation request from the available
-  memory block that is at least as large as the requested size and that results in the largest
-  remainder fragment.
-* Note that these algorithms only differ in how they find a free block. This means that you can
-  share much of the code across these three algorithms.
-
-## `dealloc()`
-
-A user program frees a previously-allocated block with `dealloc()`. It expects a single argument
-that points to the block to be freed. This is basically your own `free()`.
-
-Here are the requirements for your implementation.
-
-* Internally, you need to keep a linked list of free blocks as discussed in class. This list should
-  use the header `struct header` in `alloc.h`.
-* This means that you need to implement a custom linked list designed for the purpose of this
-  assignment. Note that this is different from a regular linked list as you can't use `malloc()`.
-  You need to directly access the heap to maintain your linked list.
-* The algorithm for managing this linked list should be exactly as described in class. For example,
-  a new free block should be inserted in the head.
-* You must coalesce contiguous free blocks (as shown in Figure 1), i.e., if two blocks, one of size
-  _m_ and other of size _n_, are consecutive in the heap, they must become a combined block of size
-  _m + n_ (as shown in Figure 2). This coalescing must happen when `dealloc()` is called.
-
-![](memory1.png)
-
-_Figure 1: Each block is labeled with its size. White indicates free blocks while allocated blocks
-are colored._
-
-![](memory2.png)
-
-_Figure 2: Example with contiguous free blocks. This should never occur as contiguous free blocks
-should be merged immediately (as shown in Figure 1)._
-
-## `allocopt()`
-
-* `allocopt()` expects two arguments. The first is the algorithm choice and the second is the limit.
-  The algorithm options are the following.
-
-  ```c
-  enum algs { FIRST_FIT, BEST_FIT, WORST_FIT };
-  ```
-
-* The limit is the ceiling on the heap size. You should only increase the heap size by `INCREMENT`
-  when it is within the limit.
-* Calling `allocopt()` should serve as a reset point. Thus, if a user program calls `allocopt()`,
-  you should reset your allocator to its initial internal state as if there were no
-  `alloc()`/`dealloc()` calls at all. This includes (but not limited to) resetting the program break
-  to the initial point.
-* The test cases always call this first to set the parameters for testing and reset the state.
-
-## `allocinfo()`
-
-* `allocinfo()` should return the current statistics using `struct allocinfo` defined in `alloc.h`.
-* The test cases only use `free_size` but other fields are useful to keep track of to check the
-  correctness of your implementation.
-
-## Code Structure and CMake
-
-* You need to use the same code structure as A8.
-* You also need to write `CMakeLists.txt` that produces a single executable named `main` that runs
-  the test cases in `main.c`. **Be very careful about file names and capitalization**. If they are
-  not exactly what we expect, it will result in a 0.
-* Similar to A8, you should not hard-code or customize your implementation tailored to our test
-  cases. Generally, you should consider the provided test cases as examples or specific instances of
-  general cases.
-
-## Debugging
-
-For this assignment, you will likely spend most of your time debugging your code. `cgdb` will help
-you greatly in that regard. Also, combine it with your own logging and tracing.
-
-## Grading
-
-* **You should not change the provided code and files** as we will replace it for our grading. This
-  is unless the description above says otherwise. This can easily result in a 0 for the assignment.
-  **Be very careful about this.** You can add your own code/files as needed.
-* **Our base grading does not use the debug option or sanitizers.** Therefore, your code should
-  function correctly without them.
-* Occasionally, and especially before you submit, make sure that you run the minimum checker, which
-  is already installed in your Docker container (`minimum_checker`). Please don't forget to run it
-  from the top directory. As with previous assignments, it performs basic checks (e.g., `.record`,
-  `.nvim`, copy-and-paste, etc.). If this does not pass, you will receive a 0.
-* `main.c` contains a main function that tests your allocator. The max score is 390. If you compile
-  it and run it, it will give you a score and also tell you which test cases have failed.
-* Code that does not compile with CMake gets a 0.
-* Code that does not generate all the required executables gets a 0.
-* Memory issues have a penalty of -39 pts. You should use appropriate sanitizers to check for memory
-  issues. Make sure you also use the debug option enabled in `CMakeLists.txt` to compile your code
-  with debug information for testing. However, your code needs to work without the debug option as
-  well. You should remove the debug option when you submit your code.
-* A wrong code directory structure has a penalty of -10 pts.
-
-## Acknowledgment
-
-Created by Mohamed Hefeeda, modified by Brian Fraser, Keval Vora, Tianzheng Wang, and Steve Ko.
+Fight data: the Kaggle dataset `scarekrow/ufc-data`, originally collected from ufcstats.com. It is independently collected and not endorsed by the UFC or ufcstats.com. Its ranking columns are snapshots at scrape time, so this project doesn't use them.
