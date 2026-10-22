@@ -1,0 +1,10 @@
+# Packages for the pipeline scripts and the scheduled job (the web app has its own list in app/requirements.txt)
+pandas>=2.0
+numpy>=1.26
+scikit-learn>=1.3
+sqlalchemy>=2.0
+psycopg2-binary>=2.9
+requests>=2.31
+beautifulsoup4>=4.12
+kaggle>=1.6
+pytest>=8.0

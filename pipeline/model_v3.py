@@ -17,7 +17,7 @@ Commands (use the OWNER database string, these write to the database)
     python pipeline/model_v3.py backtest [--rebuild]           # v3 pick for every past fight that has a line (2016 onward)
     python pipeline/model_v3.py odds --csv upcoming/odds-ufc-334.csv [--dry-run]
                                                                # enter the current line for announced bouts
-    python pipeline/model_v3.py predict                        # lock v3 picks for bouts that have a line (before the event)
+    python pipeline/model_v3.py predict [--within-days 2]      # lock v3 picks for bouts that have a line (before the event)
     python pipeline/model_v3.py grade                          # copy results over once `model_v2.py grade` has run
 
 Two-stage picks: the v2 pick is locked as soon as a card is announced (model_v2.py predict). Once a line is loaded, the v3 pick
@@ -31,7 +31,7 @@ import argparse
 import difflib
 import logging
 import sys
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -259,17 +259,21 @@ def cmd_predict(args) -> int:
     with engine.begin() as conn:
         conn.execute(sa.text("""UPDATE upcoming_picks_v3 p SET status = CASE WHEN u.status = 'cancelled' THEN 'cancelled' ELSE 'locked' END
                                 FROM upcoming_fights u WHERE u.bout_id = p.bout_id AND p.graded_at IS NULL AND p.status IN ('locked', 'cancelled')"""))
-    todo = pd.read_sql(sa.text("""
+    window = "AND u.event_date <= :lim" if args.within_days is not None else ""
+    params = {"t": today}
+    if args.within_days is not None:
+        params["lim"] = today + timedelta(days=int(args.within_days))
+    todo = pd.read_sql(sa.text(f"""
         SELECT o.bout_id, o.market_prob_a, o.odds_a, o.odds_b, u.event_name, u.event_date, u.bout_order, u.weight_class, u.title_fight,
                v.fighter_a, v.fighter_b, v.p_a_wins AS p_v2_a, v.tier
         FROM upcoming_odds o
         JOIN upcoming_fights u USING (bout_id)
         LEFT JOIN upcoming_picks_v2 v USING (bout_id)
         LEFT JOIN upcoming_picks_v3 p ON p.bout_id = o.bout_id
-        WHERE p.bout_id IS NULL AND u.status = 'scheduled' AND u.event_date > :t
-        ORDER BY u.event_date, u.bout_order"""), engine, params={"t": today})
+        WHERE p.bout_id IS NULL AND u.status = 'scheduled' AND u.event_date > :t {window}
+        ORDER BY u.event_date, u.bout_order"""), engine, params=params)
     if todo.empty:
-        log.info("No new bouts to pick (no line loaded, event not in the future, or already locked).")
+        log.info("No new bouts to pick (no line loaded, event not in the future or not yet inside the lock window, or already locked).")
         return 0
     missing = todo[todo.p_v2_a.isna()]
     if len(missing):
@@ -294,9 +298,12 @@ def cmd_predict(args) -> int:
     R["confidence"] = np.maximum(R.p_a_wins, 1 - R.p_a_wins)
     cols = ["bout_id", "event_name", "event_date", "bout_order", "weight_class", "title_fight", "fighter_a", "fighter_b", "tier", "p_v2_a",
             "market_prob_a", "p_a_wins", "predicted_winner", "confidence", "trained_on_fights"]
-    with engine.begin() as conn:
-        R[cols].to_sql("upcoming_picks_v3", conn, if_exists="append", index=False, method="multi")
-    log.info("Locked %d market-informed picks (the stacker learned from %d earlier fights)", len(R), int(R.trained_on_fights.iloc[0]))
+    if args.dry_run:
+        log.info("[dry run] %d market-informed picks would be locked; nothing written", len(R))
+    else:
+        with engine.begin() as conn:
+            R[cols].to_sql("upcoming_picks_v3", conn, if_exists="append", index=False, method="multi")
+        log.info("Locked %d market-informed picks (the stacker learned from %d earlier fights)", len(R), int(R.trained_on_fights.iloc[0]))
     for r in R.itertuples():
         v2w = r.fighter_a if r.p_v2_a >= 0.5 else r.fighter_b
         print(f"  {r.event_date}  {r.fighter_a:22s} vs {r.fighter_b:22s} -> {r.predicted_winner} {r.confidence:.0%}   (model-only said {v2w} {max(r.p_v2_a, 1 - r.p_v2_a):.0%}, market {max(r.market_prob_a, 1 - r.market_prob_a):.0%} on {r.fighter_a if r.market_prob_a >= .5 else r.fighter_b})")
@@ -333,6 +340,8 @@ def main(argv=None) -> int:
     o.add_argument("--today", help="(testing only) pretend today is YYYY-MM-DD")
     p = sub.add_parser("predict")
     p.add_argument("--today", help="(testing only) pretend today is YYYY-MM-DD")
+    p.add_argument("--within-days", type=int, default=None, help="only lock bouts whose event is at most this many days away")
+    p.add_argument("--dry-run", action="store_true", help="show the picks that would be locked; write nothing")
     sub.add_parser("grade")
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
