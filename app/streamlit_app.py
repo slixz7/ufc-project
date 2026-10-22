@@ -1,0 +1,780 @@
+"""
+UFC Fight Predictor - shareable web app (Streamlit).
+
+Read-only: it only runs SELECT queries against the Postgres views and tables built by the rest of the project.
+Pages: Upcoming card (locked pre-fight predictions + tale of the tape), Past events, Fighters, Track record.
+
+Run locally:   streamlit run app/streamlit_app.py      (from the project folder, with DATABASE_URL set)
+Deployed:      put DATABASE_URL in the host's secrets (use a READ-ONLY database user, see sql/readonly_role.sql)
+
+Look: a printed fight-night programme. Paper, black ink, one red accent, big type, ruled lines.
+"""
+from __future__ import annotations
+
+import html
+import os
+from datetime import date
+
+import altair as alt
+import pandas as pd
+import sqlalchemy as sa
+import streamlit as st
+
+st.set_page_config(page_title="UFC Fight Predictor", page_icon="🥊", layout="wide", initial_sidebar_state="collapsed")
+
+DISCLAIMER = ("Model predictions for fun, not betting advice. Over the long run the model is right roughly 6 times in 10, "
+              "and it knows nothing about injuries, weight cuts or short-notice changes.")
+
+INK, ACCENT, MUTED, HAIR = "#171717", "#c4361f", "#6b675d", "#cdc7b8"
+
+CSS = """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700;800&family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:ital,wght@0,400;0,600;1,400&display=swap');
+.stApp {background:#f3f0e8;}
+[data-testid="stSidebar"], [data-testid="stSidebarCollapsedControl"], [data-testid="stToolbar"],
+[data-testid="stDecoration"], footer {display:none !important;}
+[data-testid="stHeader"] {background:transparent; height:0;}
+[data-testid="stMainBlockContainer"], .block-container {max-width:1100px; padding:1.4rem 1.4rem 4rem;}
+
+/* navigation: the radio group becomes plain section links with a red underline */
+div[data-testid="stRadioGroup"] {display:flex; flex-direction:row; flex-wrap:wrap; gap:28px; justify-content:flex-start; border-bottom:1px solid #171717;}
+label[data-testid="stRadioOption"] {background:none; border:none; border-bottom:4px solid transparent; border-radius:0; padding:8px 0 3px; margin:0 0 -1px; cursor:pointer;}
+label[data-testid="stRadioOption"] > div > div:first-child {display:none;}
+label[data-testid="stRadioOption"] p {font-family:'Barlow Condensed','Arial Narrow',Arial,sans-serif; font-size:1.3rem; font-weight:600;
+  letter-spacing:.07em; text-transform:uppercase; margin:0; color:#6b675d;}
+label[data-testid="stRadioOption"]:hover p {color:#171717;}
+label[data-testid="stRadioOption"][data-selected="true"] {border-bottom-color:#c4361f;}
+label[data-testid="stRadioOption"][data-selected="true"] p {color:#171717; font-weight:700;}
+.stTabs [data-baseweb="tab-list"] {gap:22px; border-bottom:1px solid #171717;}
+.stTabs [data-baseweb="tab"] p {font-family:'Barlow Condensed','Arial Narrow',Arial,sans-serif; text-transform:uppercase; letter-spacing:.07em; font-size:1.15rem; font-weight:600;}
+
+.ufc {--ink:#171717; --muted:#6b675d; --hair:#cdc7b8; --accent:#c4361f; --good:#2e6b4a; --paper:#f3f0e8;
+  font-family:'Source Serif 4',Georgia,'Times New Roman',serif; color:var(--ink); font-size:1.02rem; line-height:1.45;}
+.ufc .disp {font-family:'Barlow Condensed','Arial Narrow',Arial,sans-serif; font-weight:700; text-transform:uppercase; letter-spacing:.01em;}
+.ufc .mono {font-family:'IBM Plex Mono','Courier New',monospace; font-size:.8rem; letter-spacing:.02em;}
+.ufc .muted {color:var(--muted);}
+.ufc .small {font-size:.88rem;}
+
+/* masthead */
+.ufc .mast {border-top:6px solid var(--ink); padding-top:8px;}
+.ufc .mast .top {display:flex; justify-content:space-between; align-items:baseline; flex-wrap:wrap; gap:4px 20px; margin-bottom:6px;}
+.ufc .brand {font-size:2.6rem; font-weight:800; line-height:1; letter-spacing:.02em;}
+.ufc .dateline {color:var(--muted);}
+
+/* event headline */
+.ufc .hero {padding:26px 0 4px;}
+.ufc .kicker {color:var(--accent); font-weight:600; text-transform:uppercase; letter-spacing:.14em;}
+.ufc .hero h1 {font-family:'Barlow Condensed','Arial Narrow',Arial,sans-serif; font-weight:800; text-transform:uppercase;
+  font-size:clamp(2.2rem,6.4vw,4.6rem); line-height:.94; margin:6px 0 12px; letter-spacing:.005em;}
+.ufc .facts {display:flex; flex-wrap:wrap; gap:4px 26px; padding:8px 0; border-top:1px solid var(--ink); border-bottom:1px solid var(--hair);
+  font-family:'IBM Plex Mono','Courier New',monospace; font-size:.82rem;}
+.ufc .facts b {font-weight:600;}
+.ufc .aside {color:var(--muted); font-style:italic; font-size:.92rem; margin-top:10px; max-width:64ch;}
+.ufc .sect {margin:36px 0 10px; border-top:3px solid var(--ink); padding-top:6px; display:flex; align-items:baseline; gap:14px;}
+.ufc .sect h3 {font-family:'Barlow Condensed','Arial Narrow',Arial,sans-serif; font-weight:800; font-size:1.8rem; text-transform:uppercase; margin:0; line-height:1;}
+
+/* fighter names */
+.ufc .duel {display:grid; grid-template-columns:1fr auto 1fr; gap:14px; align-items:end;}
+.ufc .side {--c:var(--ink); text-align:left;}
+.ufc .side.b {--c:var(--accent); text-align:right;}
+.ufc .side .first {font-style:italic; color:var(--muted); font-size:1.05rem; line-height:1.1; min-height:1.1em;}
+.ufc .side .last {font-family:'Barlow Condensed','Arial Narrow',Arial,sans-serif; font-weight:800; text-transform:uppercase; line-height:.92;
+  font-size:var(--ln); color:var(--c);}
+.ufc .side .rec {color:var(--muted); margin-top:5px;}
+.ufc .side.pick .last {display:inline-block; border-bottom:.09em solid var(--c); padding-bottom:.02em;}
+.ufc .side .pk {font-family:'IBM Plex Mono','Courier New',monospace; font-size:.64rem; font-weight:600; letter-spacing:.14em;
+  background:var(--c); color:#fff; padding:1px 8px; display:inline-block; margin-bottom:5px;}
+.ufc .vs {font-style:italic; color:var(--muted); font-size:1.35rem; padding-bottom:22px;}
+
+/* probability scale */
+.ufc .scale .nums {display:flex; justify-content:space-between; font-family:'IBM Plex Mono','Courier New',monospace; font-weight:600;
+  font-size:var(--pn,1.5rem); line-height:1; margin-bottom:5px;}
+.ufc .scale .nums .na {color:var(--ink);} .ufc .scale .nums .nb {color:var(--accent);}
+.ufc .scale .bar {position:relative; display:flex; height:var(--bh,12px);}
+.ufc .scale .sa {background:var(--ink);} .ufc .scale .sb {background:var(--accent);}
+.ufc .scale .tick {position:absolute; left:50%; top:-3px; bottom:-3px; width:3px; margin-left:-1px; background:var(--paper);}
+.ufc .verdict {margin-top:10px;} .ufc .verdict i {color:var(--muted);}
+.ufc .stamp {display:block; color:var(--muted); margin-top:3px;}
+.ufc .tag {font-family:'IBM Plex Mono','Courier New',monospace; font-size:.68rem; font-weight:600; letter-spacing:.14em; text-transform:uppercase;
+  border:1px solid var(--ink); padding:0 7px; margin-left:8px;}
+.ufc .mk {font-family:'IBM Plex Mono','Courier New',monospace; font-size:.8rem; font-weight:600;}
+.ufc .mk.good {color:var(--good);} .ufc .mk.bad {color:var(--accent);}
+.ufc .outcome {margin-top:6px;}
+
+/* main event, main card, prelims */
+.ufc .main {border-top:3px solid var(--ink); border-bottom:1px solid var(--ink); padding:12px 0 18px; margin-top:22px; --ln:clamp(2.4rem,7vw,5.2rem);}
+.ufc .label {display:flex; align-items:center; font-family:'IBM Plex Mono','Courier New',monospace; font-size:.74rem; letter-spacing:.14em;
+  text-transform:uppercase; color:var(--muted); margin-bottom:14px;}
+.ufc .bgrid {display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:0 44px;}
+.ufc .bout {border-top:2px solid var(--ink); padding:10px 0 18px; --ln:clamp(1.7rem,3.3vw,2.5rem); --pn:1.2rem; --bh:10px;}
+.ufc .prow {border-top:1px solid var(--hair); padding:12px 0 8px; --ln:1.55rem; --pn:.95rem; --bh:8px;}
+.ufc .prow .line {display:grid; grid-template-columns:30px 1fr 220px 1fr; gap:16px; align-items:center;}
+.ufc .prow .num {font-family:'IBM Plex Mono','Courier New',monospace; color:var(--muted); font-size:.8rem;}
+.ufc .prow .side.a {text-align:right;} .ufc .prow .side.b {text-align:left;}
+.ufc .prow .side .first {display:none;} .ufc .prow .side .rec {margin-top:2px;}
+.ufc .prow .side.pick .last {border-bottom-width:3px;}
+.ufc .prow .pk {display:none;}
+.ufc .prow .mid .small {text-align:center; font-size:.85rem; margin-top:6px;}
+
+/* tale of the tape */
+.ufc details {margin-top:8px;}
+.ufc summary {cursor:pointer; font-family:'IBM Plex Mono','Courier New',monospace; font-size:.74rem; letter-spacing:.14em; text-transform:uppercase;
+  color:var(--muted); list-style:none;}
+.ufc summary::-webkit-details-marker {display:none;}
+.ufc summary::before {content:'+\\00a0';} .ufc details[open] summary::before {content:'\\2212\\00a0';}
+.ufc summary:hover {color:var(--ink);}
+.ufc .tape {margin-top:10px;}
+.ufc .tape-head {display:grid; grid-template-columns:1fr 1.15fr 1fr; gap:12px; font-family:'Barlow Condensed','Arial Narrow',Arial,sans-serif;
+  font-weight:700; text-transform:uppercase; font-size:1.15rem; padding-bottom:4px; border-bottom:2px solid var(--ink);}
+.ufc .tape-head .b {text-align:right; color:var(--accent);}
+.ufc .tr {display:grid; grid-template-columns:1fr 1.15fr 1fr; gap:12px; align-items:center; padding:5px 0; border-bottom:1px solid var(--hair);}
+.ufc .tr .lab {text-align:center; font-family:'IBM Plex Mono','Courier New',monospace; font-size:.66rem; letter-spacing:.1em; text-transform:uppercase; color:var(--muted);}
+.ufc .tr .cell {display:flex; align-items:center; gap:8px; font-family:'IBM Plex Mono','Courier New',monospace; font-size:.84rem;}
+.ufc .tr .cell.a {flex-direction:row-reverse;}
+.ufc .tr .track {flex:1; height:5px; display:flex; background:rgba(23,23,23,.08);}
+.ufc .tr .cell.a .track {justify-content:flex-end;}
+.ufc .tr .fill {height:100%; opacity:.38;}
+.ufc .tr .cell.a .fill {background:var(--ink);} .ufc .tr .cell.b .fill {background:var(--accent);}
+.ufc .tr .cell.best .fill {opacity:1;} .ufc .tr .cell.best {font-weight:600;}
+.ufc .tr .val {min-width:54px; text-align:center;}
+.ufc .tr.textonly .cell {justify-content:center;}
+
+/* result rows, tables, figures */
+.ufc .res {display:grid; grid-template-columns:150px 1fr 150px 270px; gap:14px; align-items:baseline; padding:9px 0; border-top:1px solid var(--hair);}
+.ufc .res.three {grid-template-columns:1fr 240px 250px;}
+.ufc .res .div {font-family:'IBM Plex Mono','Courier New',monospace; font-size:.7rem; letter-spacing:.1em; text-transform:uppercase; color:var(--muted);}
+.ufc .res .w {font-weight:600; font-size:1.1rem;} .ufc .res .lo {color:var(--muted);}
+.ufc .res .how {font-family:'IBM Plex Mono','Courier New',monospace; font-size:.8rem;}
+.ufc .res > div:last-child {text-align:right;}
+.ufc .figs {display:flex; flex-wrap:wrap; border-top:3px solid var(--ink); border-bottom:1px solid var(--ink); margin:10px 0 14px;}
+.ufc .figs .c {padding:10px 30px 10px 0; margin-right:30px; border-right:1px solid var(--hair);}
+.ufc .figs .c:last-child {border-right:none;}
+.ufc .figs .v, .ufc .sheet .v {font-family:'Barlow Condensed','Arial Narrow',Arial,sans-serif; font-weight:800; font-size:3rem; line-height:1;}
+.ufc .figs .l, .ufc .sheet .l {font-family:'IBM Plex Mono','Courier New',monospace; font-size:.68rem; letter-spacing:.1em; text-transform:uppercase; color:var(--muted); margin-top:3px;}
+.ufc .sheet {display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); border-top:3px solid var(--ink); margin:18px 0 6px;}
+.ufc .sheet .c {padding:10px 12px 10px 0; border-bottom:1px solid var(--hair);}
+.ufc .sheet .v {font-size:2.4rem;}
+.ufc table.hist {width:100%; border-collapse:collapse;}
+.ufc table.hist th {font-family:'IBM Plex Mono','Courier New',monospace; font-size:.68rem; letter-spacing:.12em; text-transform:uppercase; color:var(--muted);
+  text-align:left; padding:6px 8px 6px 0; border-bottom:2px solid var(--ink);}
+.ufc table.hist td {padding:7px 8px 7px 0; border-bottom:1px solid var(--hair); font-size:.95rem;}
+.ufc .note {color:var(--muted); font-style:italic; font-size:.9rem; margin-top:10px;}
+.ufc .foot {margin-top:42px; border-top:1px solid var(--ink); padding-top:10px; color:var(--muted); font-style:italic; font-size:.88rem;}
+
+@media (max-width:760px) {
+  .ufc .brand {font-size:1.9rem;} .ufc .main {--ln:2.3rem;}
+  .ufc .bgrid {grid-template-columns:1fr; gap:0;}
+  .ufc .prow .line {grid-template-columns:1fr; gap:6px;} .ufc .prow .num {display:none;}
+  .ufc .prow .side.a, .ufc .prow .side.b {text-align:left;}
+  .ufc .res, .ufc .res.three {grid-template-columns:1fr; gap:2px;} .ufc .res > div:last-child {text-align:left;}
+  .ufc .sheet {grid-template-columns:repeat(2,minmax(0,1fr));} .ufc .figs .v {font-size:2.3rem;}
+  .ufc .figs .c {padding-right:16px; margin-right:16px;}
+  .ufc .tr {gap:6px;} .ufc .tr .val {min-width:42px; font-size:.78rem;}
+  label[data-testid="stRadioOption"] p {font-size:1.02rem; letter-spacing:.04em;} div[data-testid="stRadioGroup"] {gap:13px;}
+}
+</style>
+"""
+
+
+# ------------------------------------------------------------------------------------------------
+# database
+# ------------------------------------------------------------------------------------------------
+@st.cache_resource
+def _make_engine(url: str):
+    for prefix in ("postgres://", "postgresql://"):
+        if url.startswith(prefix):
+            url = "postgresql+psycopg2://" + url[len(prefix):]
+    return sa.create_engine(url, pool_pre_ping=True)
+
+
+def get_engine():
+    """Only a real engine is cached, so fixing a missing/wrong secret takes effect right away."""
+    url = None
+    try:
+        url = st.secrets.get("DATABASE_URL")
+    except Exception:                      # no secrets file when running locally
+        url = None
+    url = url or os.getenv("DATABASE_URL")
+    return _make_engine(url) if url else None
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def q(sql: str, params: dict | None = None) -> pd.DataFrame:
+    engine = get_engine()
+    if engine is None:
+        raise RuntimeError("DATABASE_URL is not set")
+    with engine.connect() as conn:
+        return pd.read_sql(sa.text(sql), conn, params=params or {})
+
+
+# ------------------------------------------------------------------------------------------------
+# formatting helpers
+# ------------------------------------------------------------------------------------------------
+def isnull(v) -> bool:
+    return v is None or (isinstance(v, float) and pd.isna(v)) or v is pd.NA or v is pd.NaT
+
+
+def f_pct(v):    return "–" if isnull(v) else f"{float(v):.0%}"
+def f_num(v, d=1): return "–" if isnull(v) else f"{float(v):.{d}f}"
+def f_int(v):    return "–" if isnull(v) else f"{int(v)}"
+def f_streak(v):
+    if isnull(v) or int(v) == 0:
+        return "–"
+    return f"W{int(v)}" if int(v) > 0 else f"L{-int(v)}"
+def f_height(cm):
+    if isnull(cm):
+        return "–"
+    inches = round(float(cm) / 2.54)
+    return f"{inches // 12}' {inches % 12}\""
+def f_reach(cm):  return "–" if isnull(cm) else f"{round(float(cm) / 2.54)}\""
+def f_text(v):    return "–" if isnull(v) or str(v).strip() == "" else str(v)
+def f_date(d):    return "–" if isnull(d) else pd.Timestamp(d).strftime("%b %d, %Y")
+
+
+
+
+# ------------------------------------------------------------------------------------------------
+# presentation helpers
+# ------------------------------------------------------------------------------------------------
+esc = html.escape
+SUFFIXES = {"jr", "jr.", "sr", "sr.", "ii", "iii", "iv"}
+
+
+def split_name(name: str):
+    parts = name.split()
+    if len(parts) <= 1:
+        return "", name
+    k = 2 if (len(parts) > 2 and parts[-1].lower() in SUFFIXES) else 1
+    return " ".join(parts[:-k]), " ".join(parts[-k:])
+
+
+def side_html(name: str, rec: str, side: str, picked: bool = False) -> str:
+    first, last = split_name(name)
+    pk = '<div class="pk">MODEL PICK</div>' if picked else ""
+    return (f'<div class="side {side}{" pick" if picked else ""}">{pk}<div class="first">{esc(first)}</div>'
+            f'<div class="last">{esc(last)}</div><div class="rec mono">{esc(rec)}</div></div>')
+
+
+def scale_html(p_a: float) -> str:
+    pa = max(0.02, min(0.98, float(p_a)))
+    return (f'<div class="scale"><div class="nums"><span class="na">{pa:.0%}</span><span class="nb">{1 - pa:.0%}</span></div>'
+            f'<div class="bar"><i class="sa" style="width:{pa * 100:.1f}%"></i><i class="sb" style="width:{(1 - pa) * 100:.1f}%"></i>'
+            f'<b class="tick"></b></div></div>')
+
+
+def lean(conf: float) -> str:
+    return "Toss-up" if conf < 0.55 else ("Slight lean" if conf < 0.65 else "Clear lean")
+
+
+def days_label(d: date, today: date) -> str:
+    n = (d - today).days
+    return "Today" if n == 0 else "Tomorrow" if n == 1 else f"In {n} days" if n > 1 else f"{-n} days ago"
+
+
+def method_text(result) -> str:
+    r = str(result or "")
+    if "KO" in r or "TKO" in r:
+        return "KO/TKO"
+    if "Sub" in r:
+        return "SUB"
+    if "Decision" in r:
+        return "DEC"
+    return r[:10].upper() or "–"
+
+
+# (key, label, formatter, "high"/"low" = which value is better / None, draw bars?)
+TAPE = [
+    ("n_prev", "UFC fights", f_int, "high", True), ("age", "Age on fight night", lambda v: f_num(v, 1), None, True),
+    ("height", "Height", f_height, None, True), ("reach", "Reach", f_reach, "high", True),
+    ("stance", "Stance", f_text, None, False),
+    ("prev_win_rate", "UFC win rate", f_pct, "high", True), ("last3_win_rate", "Last 3 fights", f_pct, "high", True),
+    ("streak", "Current streak", f_streak, None, False), ("days_since_last", "Days since last fight", f_int, None, False),
+    ("slpm", "Strikes landed / min", lambda v: f_num(v, 2), "high", True),
+    ("sapm", "Strikes absorbed / min", lambda v: f_num(v, 2), "low", True),
+    ("sig_acc", "Striking accuracy", f_pct, "high", True), ("td_per15", "Takedowns / 15 min", lambda v: f_num(v, 2), "high", True),
+    ("td_def", "Takedown defense", f_pct, "high", True), ("ctrl_share", "Control time", f_pct, "high", True),
+    ("ko_win_rate", "KO/TKO win rate", f_pct, "high", True), ("sub_win_rate", "Submission win rate", f_pct, "high", True),
+    ("lastfight", "Last fight", f_text, None, False), ("fin3", "Finishes, last 3 fights", f_text, None, False),
+]
+
+
+def tape_html(row, name_a: str, name_b: str, wanted: set | None = None) -> str:
+    out = [f'<div class="tape"><div class="tape-head"><div>{esc(name_a)}</div><div></div><div class="b">{esc(name_b)}</div></div>']
+    for key, label, fmt, better, bars in TAPE:
+        if wanted is not None and key not in wanted:
+            continue
+        a, b = row.get(f"a_{key}"), row.get(f"b_{key}")
+        if isnull(a) and isnull(b):
+            continue
+        best_a = best_b = False
+        wa = wb = 0.0
+        numeric = bars and not isnull(a) and not isnull(b) and not isinstance(a, str)
+        if numeric:
+            fa, fb = float(a), float(b)
+            top = max(fa, fb, 1e-9)
+            wa, wb = max(3.0, fa / top * 100), max(3.0, fb / top * 100)
+            if better and fa != fb:
+                best_a = (fa > fb) if better == "high" else (fa < fb)
+                best_b = not best_a
+        if numeric:
+            out.append(f'<div class="tr"><div class="cell a{" best" if best_a else ""}"><span class="val">{esc(fmt(a))}</span>'
+                       f'<div class="track"><div class="fill" style="width:{wa:.0f}%"></div></div></div>'
+                       f'<div class="lab">{esc(label)}</div>'
+                       f'<div class="cell b{" best" if best_b else ""}"><span class="val">{esc(fmt(b))}</span>'
+                       f'<div class="track"><div class="fill" style="width:{wb:.0f}%"></div></div></div></div>')
+        else:
+            out.append(f'<div class="tr textonly"><div class="cell a" style="justify-content:flex-start"><span class="val">{esc(fmt(a))}</span></div>'
+                       f'<div class="lab">{esc(label)}</div>'
+                       f'<div class="cell b" style="justify-content:flex-end"><span class="val">{esc(fmt(b))}</span></div></div>')
+    out.append("</div>")
+    return "".join(out)
+
+
+def tape_details(row, name_a: str, name_b: str, open_: bool = False) -> str:
+    if isnull(row.get("a_n_prev")):
+        return ""
+    return f'<details{" open" if open_ else ""}><summary>Tale of the tape</summary>{tape_html(row, name_a, name_b)}</details>'
+
+
+def module_html(s: str):
+    st.html(f'<div class="ufc">{s}</div>')
+
+
+def figs(items) -> str:
+    return '<div class="figs">' + "".join(f'<div class="c"><div class="v">{esc(v)}</div><div class="l">{esc(l)}</div></div>' for v, l in items) + "</div>"
+
+
+def sheet(items) -> str:
+    return '<div class="sheet">' + "".join(f'<div class="c"><div class="v">{esc(v)}</div><div class="l">{esc(l)}</div></div>' for v, l in items) + "</div>"
+
+
+def mark(ok: bool, text: str) -> str:
+    return f'<span class="mk {"good" if ok else "bad"}">{"✓" if ok else "✗"} {esc(text)}</span>'
+
+
+STAT_COLS = ", ".join(f"m.a_{k} AS a_{k}, m.b_{k} AS b_{k}" for k, *_ in TAPE if k not in ("stance", "lastfight", "fin3"))
+
+
+# ------------------------------------------------------------------------------------------------
+# page: upcoming card
+# ------------------------------------------------------------------------------------------------
+TIER_TEXT = {"limited": "Limited data: one of these fighters has only 1 or 2 UFC fights.",
+             "debut": "Very little to go on: a fighter here has no earlier UFC fights."}
+
+
+def tier_note(tier) -> str:
+    if isnull(tier) or tier not in TIER_TEXT:
+        return ""
+    acc = q("SELECT tier, accuracy FROM v2_tier_accuracy WHERE method = 'model'")
+    a = acc[acc.tier == tier]
+    extra = f" Picks like this have been right about {float(a.accuracy.iloc[0]):.0%} of the time." if len(a) else ""
+    return f'<div class="note" style="margin-top:6px">{esc(TIER_TEXT[tier])}{esc(extra)}</div>'
+
+
+def pick_parts(r):
+    """(probability scale, verdict text, picked_a, picked_b)"""
+    picked_a = (not isnull(r.predicted_winner)) and r.predicted_winner == r.fighter_a
+    picked_b = (not isnull(r.predicted_winner)) and r.predicted_winner == r.fighter_b
+    scale = ""
+    if not isnull(r.p_a_wins):
+        scale = scale_html(r.p_a_wins)
+        stamp = pd.Timestamp(r.predicted_at).strftime("%b %d, %Y, %H:%M UTC")
+        verdict = (f'The model leans <b>{esc(r.predicted_winner)}</b>, {float(r.confidence):.0%}. '
+                   f'<i>{lean(float(r.confidence))}.</i><span class="stamp mono">Locked {stamp}</span>') + tier_note(r.tier)
+    else:
+        verdict = '<span class="muted">Prediction not made yet.</span>'
+    if not isnull(r.actual_winner):
+        verdict += f'<div class="outcome">{mark(int(r.correct) == 1, "Model right" if int(r.correct) == 1 else "Model wrong")} &nbsp;{esc(r.actual_winner)} won</div>'
+    return scale, verdict, picked_a, picked_b
+
+
+def main_event_html(r, rec: dict) -> str:
+    scale, verdict, pa, pb = pick_parts(r)
+    title = '<span class="tag">Championship</span>' if r.title_fight else ""
+    return (f'<div class="main"><div class="label"><span>Main event &nbsp;·&nbsp; {esc(f_text(r.weight_class))}</span>{title}</div>'
+            f'<div class="duel">{side_html(r.fighter_a, rec.get(r.fighter_a_url, "UFC debut"), "a", pa)}<div class="vs">vs.</div>'
+            f'{side_html(r.fighter_b, rec.get(r.fighter_b_url, "UFC debut"), "b", pb)}</div>'
+            f'<div style="margin-top:20px">{scale}</div><div class="verdict">{verdict}</div>'
+            f'{tape_details(pd.Series(r._asdict()), r.fighter_a, r.fighter_b, open_=True)}</div>')
+
+
+def bout_html(r, rec: dict) -> str:
+    scale, verdict, pa, pb = pick_parts(r)
+    num = f"{int(r.bout_order):02d}" if not isnull(r.bout_order) else ""
+    title = '<span class="tag">Title</span>' if r.title_fight else ""
+    return (f'<div class="bout"><div class="label"><span>{num} &nbsp;·&nbsp; {esc(f_text(r.weight_class))}</span>{title}</div>'
+            f'<div class="duel">{side_html(r.fighter_a, rec.get(r.fighter_a_url, "UFC debut"), "a", pa)}<div class="vs">vs.</div>'
+            f'{side_html(r.fighter_b, rec.get(r.fighter_b_url, "UFC debut"), "b", pb)}</div>'
+            f'<div style="margin-top:14px">{scale}</div><div class="verdict">{verdict}</div>'
+            f'{tape_details(pd.Series(r._asdict()), r.fighter_a, r.fighter_b)}</div>')
+
+
+def prow_html(r, rec: dict) -> str:
+    scale, verdict, pa, pb = pick_parts(r)
+    num = f"{int(r.bout_order):02d}" if not isnull(r.bout_order) else ""
+    small = ""
+    if not isnull(r.predicted_winner):
+        tag = "" if isnull(r.tier) or r.tier == "full" else f", {r.tier} data"
+        small = f'<div class="small">Leans <b>{esc(r.predicted_winner)}</b>, {float(r.confidence):.0%} <i class="muted">({lean(float(r.confidence)).lower()}{esc(tag)})</i></div>'
+    if not isnull(r.actual_winner):
+        small += f'<div class="small">{mark(int(r.correct) == 1, "Right" if int(r.correct) == 1 else "Wrong")} &nbsp;{esc(r.actual_winner)} won</div>'
+    div = esc(f_text(r.weight_class)) + (' <span class="tag">Title</span>' if r.title_fight else "")
+    return (f'<div class="prow"><div class="line"><div class="num">{num}</div>'
+            f'{side_html(r.fighter_a, rec.get(r.fighter_a_url, "UFC debut"), "a", pa)}'
+            f'<div class="mid"><div class="label" style="justify-content:center;margin:0 0 6px">{div}</div>{scale}{small}</div>'
+            f'{side_html(r.fighter_b, rec.get(r.fighter_b_url, "UFC debut"), "b", pb)}</div>'
+            f'{tape_details(pd.Series(r._asdict()), r.fighter_a, r.fighter_b)}</div>')
+
+
+def page_upcoming():
+    events = q("""SELECT event_name, event_date, COUNT(*) FILTER (WHERE status <> 'cancelled') AS bouts
+                  FROM upcoming_fights GROUP BY event_name, event_date ORDER BY event_date DESC""")
+    if events.empty:
+        st.info("No cards have been loaded yet.")
+        return
+    today = date.today()
+    events["event_date"] = pd.to_datetime(events.event_date).dt.date
+    future = events[events.event_date >= today].sort_values("event_date")
+    past = events[events.event_date < today]
+    ordered = pd.concat([future, past])
+    labels = [f"{r.event_name}  -  {f_date(r.event_date)}" + ("  (upcoming)" if r.event_date >= today else "")
+              for r in ordered.itertuples()]
+    choice = st.selectbox("Choose a card", labels, index=0)
+    ev = ordered.iloc[labels.index(choice)]
+
+    bouts = q(f"""
+        SELECT u.bout_id, u.bout_order, u.weight_class, u.title_fight, u.status AS bout_status,
+               u.fighter_a_name AS fighter_a, u.fighter_b_name AS fighter_b, u.fighter_a_url, u.fighter_b_url,
+               p.p_a_wins, p.predicted_winner, p.confidence, p.predicted_at, p.tier, p.method,
+               p.actual_winner, p.correct, p.a_prior_fights, p.b_prior_fights, {STAT_COLS}
+        FROM upcoming_fights u
+        LEFT JOIN upcoming_picks_v2 p ON p.bout_id = u.bout_id
+        LEFT JOIN upcoming_model_rows m ON m.bout_id = u.bout_id
+        WHERE u.event_name = :e AND u.event_date = :d
+        ORDER BY u.bout_order""", {"e": ev.event_name, "d": ev.event_date})
+    all_urls = list(set(bouts.fighter_a_url) | set(bouts.fighter_b_url))
+    stance = q("""SELECT DISTINCT ON (ff.fighter_url) ff.fighter_url, ff.stance FROM fighter_fights ff
+                  JOIN fights f USING (fight_url) WHERE ff.fighter_url = ANY(:u)
+                  ORDER BY ff.fighter_url, f.event_date DESC""", {"u": all_urls})
+    stance_map = dict(zip(stance.fighter_url, stance.stance))
+    bouts["a_stance"] = bouts.fighter_a_url.map(stance_map)
+    bouts["b_stance"] = bouts.fighter_b_url.map(stance_map)
+
+    # context lines (shown next to the model's pick, not used by it): last fight and recent finishes
+    last3 = q("""SELECT fighter_url, event_date, won, result, rn FROM (
+                   SELECT ff.fighter_url, f.event_date, ff.won, f.result,
+                          ROW_NUMBER() OVER (PARTITION BY ff.fighter_url ORDER BY f.event_date DESC, f.fight_url DESC) AS rn
+                   FROM fighter_fights ff JOIN fights f USING (fight_url) WHERE ff.fighter_url = ANY(:u)) t
+                 WHERE rn <= 3""", {"u": all_urls})
+    ctx = {}
+    for url, g in last3.groupby("fighter_url"):
+        g = g.sort_values("rn")
+        lf = g.iloc[0]
+        months = (pd.Timestamp(ev.event_date) - pd.Timestamp(lf.event_date)).days / 30.44
+        ago = f"{months:.0f} mo ago" if months < 24 else f"{months / 12:.1f} yr ago"
+        fins = int(((g.won == 1) & g.result.isin(["KO/TKO", "Submission"])).sum())
+        ctx[url] = (f"{'W' if int(lf.won) == 1 else 'L'} {method_text(lf.result)}, {ago}", f"{fins} of {len(g)}")
+    for side in "ab":
+        bouts[f"{side}_lastfight"] = bouts[f"fighter_{side}_url"].map(lambda u: ctx.get(u, (None, None))[0])
+        bouts[f"{side}_fin3"] = bouts[f"fighter_{side}_url"].map(lambda u: ctx.get(u, (None, None))[1])
+    live = bouts[bouts.bout_status != "cancelled"]
+    gone = bouts[bouts.bout_status == "cancelled"]
+
+    urls = list(set(live.fighter_a_url) | set(live.fighter_b_url))
+    rec = {}
+    if urls:
+        r = q("""SELECT fighter_url, SUM(won) AS w, COUNT(*) - SUM(won) AS l FROM fighter_fights
+                 WHERE fighter_url = ANY(:u) GROUP BY fighter_url""", {"u": urls})
+        rec = {x.fighter_url: f"UFC {int(x.w)}-{int(x.l)}" for x in r.itertuples()}
+
+    graded = live[live.correct.notna()]
+    n_picks = int(live.p_a_wins.notna().sum())
+    n_thin = int(live.tier.isin(["limited", "debut"]).sum())
+    right = f"{int(graded.correct.sum())} of {len(graded)}" if len(graded) else "waiting for results"
+    when = pd.Timestamp(ev.event_date).strftime("%A, %B %d, %Y")
+    module_html(f'<div class="hero"><div class="kicker mono">{esc(days_label(ev.event_date, today))} &nbsp;·&nbsp; {esc(when)}</div>'
+                f'<h1>{esc(ev.event_name)}</h1>'
+                f'<div class="facts"><span><b>{len(live)}</b> bouts</span><span><b>{n_picks}</b> model picks</span>'
+                f'<span><b>{n_thin}</b> on limited data</span><span>Picks right: <b>{esc(right)}</b></span></div>'
+                f'<div class="aside">Left and right is just the order on the card, not the favourite. Each pick is saved with a timestamp '
+                f'before the event and never changed.</div></div>')
+    rows = list(live.itertuples())
+    if rows:
+        module_html(main_event_html(rows[0], rec))
+    main_card, prelims = rows[1:5], rows[5:]
+    if main_card:
+        module_html('<div class="sect"><h3>Main card</h3></div><div class="bgrid">' + "".join(bout_html(r, rec) for r in main_card) + "</div>")
+    if prelims:
+        module_html('<div class="sect"><h3>Prelims</h3></div>' + "".join(prow_html(r, rec) for r in prelims))
+    if not gone.empty:
+        names = ", ".join(f"{esc(r.fighter_a)} vs {esc(r.fighter_b)}" for r in gone.itertuples())
+        module_html(f'<div class="note">Removed from the card: {names}.</div>')
+
+
+# ------------------------------------------------------------------------------------------------
+# page: past events
+# ------------------------------------------------------------------------------------------------
+def page_past():
+    ev = q("""SELECT event_name, event_date, COUNT(*) AS fights FROM fights
+              GROUP BY event_name, event_date ORDER BY event_date DESC""")
+    ev["event_date"] = pd.to_datetime(ev.event_date)
+    years = sorted(ev.event_date.dt.year.unique(), reverse=True)
+    c1, c2 = st.columns([1, 3])
+    year = c1.selectbox("Year", years, index=0)
+    sub = ev[ev.event_date.dt.year == year]
+    labels = [f"{r.event_date.strftime('%b %d')}  -  {r.event_name}  ({int(r.fights)} fights)" for r in sub.itertuples()]
+    choice = c2.selectbox("Event", labels, index=0)
+    row = sub.iloc[labels.index(choice)]
+    fights = q("""
+        SELECT f.weight_class, f.title_fight, w.fighter_name AS winner, l.fighter_name AS loser, f.result,
+               f.finish_round, f.finish_time, p.predicted_winner, p.confidence, p.correct, p.tier, p.method
+        FROM fights f
+        JOIN fighter_fights w ON w.fight_url = f.fight_url AND w.won = 1
+        JOIN fighter_fights l ON l.fight_url = f.fight_url AND l.won = 0
+        LEFT JOIN fight_picks_v2 p ON p.fight_url = f.fight_url
+        WHERE f.event_name = :e AND f.event_date = :d
+        ORDER BY f.title_fight DESC, f.fight_url""", {"e": row.event_name, "d": row.event_date.date()})
+    first_model = q("SELECT MIN(event_date) AS d FROM fight_picks_v2 WHERE method = 'model'").iloc[0, 0]
+    scored = fights[fights.correct.notna()]
+    model_fact = f'<span>Model: <b>{int(scored.correct.sum())} of {len(scored)}</b> right</span>' if len(scored) else ""
+    body = []
+    for r in fights.itertuples():
+        title = ' <span class="tag">Title</span>' if r.title_fight else ""
+        if isnull(r.correct):
+            model = '<span class="muted small">no pick stored yet</span>'
+        else:
+            ok = int(r.correct) == 1
+            bits = []
+            if r.tier in ("limited", "debut"):
+                bits.append(f"{r.tier} data")
+            if r.method == "early_rule":
+                bits.append("early-era rule")
+            tag = f' <span class="muted small">· {esc(", ".join(bits))}</span>' if bits else ""
+            model = mark(ok, f"{str(r.predicted_winner)} ({float(r.confidence):.0%})") + tag
+        body.append(f'<div class="res"><div class="div">{esc(f_text(r.weight_class))}{title}</div>'
+                    f'<div><span class="w">{esc(r.winner)}</span> <span class="lo">def. {esc(r.loser)}</span></div>'
+                    f'<div class="how">{method_text(r.result)} &nbsp;R{f_int(r.finish_round)} {esc(f_text(r.finish_time))}</div><div>{model}</div></div>')
+    early = ""
+    if not isnull(first_model):
+        early = (f" Fights before {pd.Timestamp(first_model).strftime('%B %Y')} use a simple rule (higher Elo rating, then the younger fighter) "
+                 f"because the model had too few earlier fights to learn from.")
+    module_html(f'<div class="hero"><div class="kicker mono">{esc(row.event_date.strftime("%A, %B %d, %Y"))}</div><h1>{esc(row.event_name)}</h1>'
+                f'<div class="facts"><span><b>{len(fights)}</b> fights</span>{model_fact}</div></div>'
+                f'<div style="margin-top:8px">{"".join(body)}</div>'
+                f'<div class="note">Every pick here is an after-the-fact test: the model is retrained using only fights from before the event. '
+                f'Fights with a debut or newcomer carry less information, so their picks are less reliable.{esc(early)}</div>')
+
+
+# ------------------------------------------------------------------------------------------------
+# page: fighters
+# ------------------------------------------------------------------------------------------------
+def career(url: str) -> dict:
+    r = q("""SELECT COUNT(*) AS fights, SUM(won) AS wins, SUM(ko_win) AS ko_wins, SUM(sub_win) AS sub_wins,
+                    SUM(sig_land)::float8 / NULLIF(SUM(dur_sec) / 60.0, 0) AS slpm,
+                    SUM(sig_absorbed)::float8 / NULLIF(SUM(dur_sec) / 60.0, 0) AS sapm,
+                    SUM(sig_land)::float8 / NULLIF(SUM(sig_att), 0) AS sig_acc,
+                    SUM(td_land)::float8 / NULLIF(SUM(dur_sec) / 900.0, 0) AS td15,
+                    1 - SUM(opp_td_land)::float8 / NULLIF(SUM(opp_td_att), 0) AS td_def,
+                    SUM(ctrl_sec)::float8 / NULLIF(SUM(dur_sec), 0) AS ctrl_share
+             FROM fighter_fights_enriched WHERE fighter_url = :u""", {"u": url}).iloc[0].to_dict()
+    bio = q("""SELECT ff.height_cm, ff.reach_cm, ff.stance, ff.dob FROM fighter_fights ff JOIN fights f USING (fight_url)
+               WHERE ff.fighter_url = :u ORDER BY f.event_date DESC LIMIT 1""", {"u": url}).iloc[0].to_dict()
+    return {**r, **bio}
+
+
+def page_fighters():
+    idx = q("""SELECT ff.fighter_url, MAX(ff.fighter_name) AS name, COUNT(*) AS fights, MAX(f.event_date) AS last_fight
+               FROM fighter_fights ff JOIN fights f USING (fight_url) GROUP BY ff.fighter_url ORDER BY MAX(ff.fighter_name)""")
+    idx["last_fight"] = pd.to_datetime(idx.last_fight)
+    labels = [f"{r.name}  -  {int(r.fights)} UFC fights (last {r.last_fight.year})" for r in idx.itertuples()]
+    # open on the headliner of the nearest upcoming card (and their opponent for the comparison) when there is one
+    d_a, d_b = 0, min(1, len(labels) - 1)
+    try:
+        hl = q("""SELECT fighter_a_url, fighter_b_url FROM upcoming_fights WHERE status = 'scheduled'
+                  ORDER BY (event_date < CURRENT_DATE), event_date, bout_order LIMIT 1""")
+        if not hl.empty:
+            pos = {u: i for i, u in enumerate(idx.fighter_url)}
+            d_a = pos.get(hl.iloc[0].fighter_a_url, d_a)
+            d_b = pos.get(hl.iloc[0].fighter_b_url, d_b)
+    except Exception:
+        pass
+    tab_profile, tab_compare = st.tabs(["Profile", "Compare two fighters"])
+
+    with tab_profile:
+        choice = st.selectbox("Search for a fighter", labels, index=d_a, key="fighter_one")
+        fr = idx.iloc[labels.index(choice)]
+        c = career(fr.fighter_url)
+        wins, fights = int(c["wins"]), int(c["fights"])
+        hist = q("""SELECT f.event_date, f.event_name, o.fighter_name AS opponent, a.won, f.result, f.finish_round,
+                           f.finish_time, f.weight_class
+                    FROM fighter_fights a JOIN fights f ON f.fight_url = a.fight_url
+                    JOIN fighter_fights o ON o.fight_url = a.fight_url AND o.fighter_url <> a.fighter_url
+                    WHERE a.fighter_url = :u ORDER BY f.event_date DESC""", {"u": fr.fighter_url})
+        trs = "".join(
+            f'<tr><td class="mono">{pd.Timestamp(h.event_date).strftime("%Y-%m-%d")}</td><td>{esc(h.event_name)}</td><td>{esc(h.opponent)}</td>'
+            f'<td>{mark(int(h.won) == 1, "W" if int(h.won) == 1 else "L")}</td><td class="mono">{method_text(h.result)}</td>'
+            f'<td class="mono">R{f_int(h.finish_round)} {esc(f_text(h.finish_time))}</td><td class="muted">{esc(f_text(h.weight_class))}</td></tr>'
+            for h in hist.itertuples())
+        stats = [(f_num(c["slpm"], 2), "Strikes landed / min"), (f_num(c["sapm"], 2), "Strikes absorbed / min"),
+                 (f_pct(c["sig_acc"]), "Striking accuracy"), (f_num(c["td15"], 2), "Takedowns / 15 min"),
+                 (f_pct(c["td_def"]), "Takedown defense"), (f_pct(c["ctrl_share"]), "Control time"),
+                 (f"{int(c['ko_wins'])}", "KO/TKO wins"), (f"{int(c['sub_wins'])}", "Submission wins")]
+        module_html(f'<div class="hero"><div class="kicker mono">UFC record &nbsp;{wins}-{fights - wins}</div><h1>{esc(fr["name"])}</h1>'
+                    f'<div class="facts"><span>Height <b>{esc(f_height(c["height_cm"]))}</b></span><span>Reach <b>{esc(f_reach(c["reach_cm"]))}</b></span>'
+                    f'<span>Stance <b>{esc(f_text(c["stance"]))}</b></span></div></div>{sheet(stats)}'
+                    f'<div class="sect"><h3>Fight history</h3></div>'
+                    f'<table class="hist"><tr><th>Date</th><th>Event</th><th>Opponent</th><th>Result</th><th>Method</th><th>Round / time</th>'
+                    f'<th>Division</th></tr>{trs}</table>'
+                    f'<div class="note">Career numbers come from UFC fights in the dataset only; earlier pro fights are not included.</div>')
+
+    with tab_compare:
+        col1, col2 = st.columns(2)
+        ca = col1.selectbox("Fighter A", labels, index=d_a, key="cmp_a")
+        cb = col2.selectbox("Fighter B", labels, index=d_b, key="cmp_b")
+        ra, rb = idx.iloc[labels.index(ca)], idx.iloc[labels.index(cb)]
+        sa_, sb_ = career(ra.fighter_url), career(rb.fighter_url)
+        row = {}
+        for key, val in (("a", sa_), ("b", sb_)):
+            w, n = val["wins"], val["fights"]
+            row.update({f"{key}_n_prev": n, f"{key}_prev_win_rate": w / n if n else None,
+                        f"{key}_height": val["height_cm"], f"{key}_reach": val["reach_cm"], f"{key}_stance": val["stance"],
+                        f"{key}_slpm": val["slpm"], f"{key}_sapm": val["sapm"], f"{key}_sig_acc": val["sig_acc"],
+                        f"{key}_td_per15": val["td15"], f"{key}_td_def": val["td_def"], f"{key}_ctrl_share": val["ctrl_share"],
+                        f"{key}_ko_win_rate": val["ko_wins"] / n if n else None,
+                        f"{key}_sub_win_rate": val["sub_wins"] / n if n else None})
+        wanted = {"n_prev", "prev_win_rate", "height", "reach", "stance", "slpm", "sapm", "sig_acc", "td_per15", "td_def",
+                  "ctrl_share", "ko_win_rate", "sub_win_rate"}
+        rec_a = f"UFC {int(sa_['wins'])}-{int(sa_['fights']) - int(sa_['wins'])}"
+        rec_b = f"UFC {int(sb_['wins'])}-{int(sb_['fights']) - int(sb_['wins'])}"
+        module_html(f'<div class="main" style="--ln:clamp(2rem,5.5vw,3.8rem)"><div class="duel">{side_html(ra["name"], rec_a, "a")}'
+                    f'<div class="vs">vs.</div>{side_html(rb["name"], rec_b, "b")}</div>'
+                    f'<div style="margin-top:14px">{tape_html(row, ra["name"], rb["name"], wanted)}</div></div>'
+                    f'<div class="note">Career numbers across all their UFC fights.</div>')
+
+
+# ------------------------------------------------------------------------------------------------
+# page: track record
+# ------------------------------------------------------------------------------------------------
+def style_chart(ch):
+    mono = "IBM Plex Mono, Courier New, monospace"
+    return (ch.configure(background="transparent").configure_view(stroke=None)
+            .configure_axis(labelColor=MUTED, titleColor=MUTED, gridColor="#d9d4c7", domainColor=INK, tickColor=INK,
+                            labelFont=mono, titleFont=mono, labelFontSize=11)
+            .configure_legend(labelColor=INK, titleColor=MUTED))
+
+
+def page_track():
+    up = q("""SELECT event_name, event_date, fighter_a, fighter_b, tier, status, predicted_winner, confidence, actual_winner, correct,
+                     predicted_at, graded_at FROM upcoming_picks_v2""")
+    graded = up[up.correct.notna()]
+    pending = up[(up.status == "locked") & up.graded_at.isna()]
+    acc = f"{graded.correct.mean():.0%}" if len(graded) else "–"
+    module_html('<div class="hero"><div class="kicker mono">The record that counts</div><h1>Locked pre-fight predictions</h1>'
+                '<div class="aside" style="margin-top:0">Made before each card and never changed. Every fight gets a pick.</div></div>'
+                + figs([(str(len(graded)), "Graded"), (str(int(graded.correct.sum())) if len(graded) else "–", "Right"),
+                        (acc, "Accuracy"), (str(len(pending)), "Waiting for results")]))
+    if len(graded):
+        g = graded.sort_values("event_date", ascending=False)
+        rows = "".join(
+            f'<div class="res three"><div><span class="w">{esc(r.fighter_a)}</span> <span class="lo">vs</span> <span class="w">{esc(r.fighter_b)}</span>'
+            f'<div class="div">{esc(r.event_name)}</div></div>'
+            f'<div class="how">Pick: {esc(str(r.predicted_winner))} ({float(r.confidence):.0%}){"" if r.tier == "full" else " · " + esc(str(r.tier)) + " data"}</div>'
+            f'<div>{mark(int(r.correct) == 1, ("Right" if int(r.correct) == 1 else "Wrong") + ", " + str(r.actual_winner) + " won")}</div></div>'
+            for r in g.itertuples())
+        module_html(rows + f'<div class="note">{len(graded)} graded predictions is a small sample, so expect this number to swing a lot at first.</div>')
+    else:
+        module_html('<div class="note">No locked predictions have been graded yet. The first ones appear after the next card finishes and '
+                    'the dataset updates (usually a day or two).</div>')
+
+    sb = q("SELECT event_date, event_name, fights, correct, running_accuracy, total_fights FROM v2_scoreboard_running ORDER BY event_date")
+    if sb.empty:
+        module_html('<div class="sect"><h3>Backtest scoreboard</h3></div>')
+        st.info("No backtest data yet.")
+        return
+    start_year = pd.Timestamp(sb.event_date.min()).year
+    module_html(f'<div class="sect"><h3>Backtest scoreboard</h3></div><div class="aside" style="margin-top:0">Every fight from {start_year} onward, '
+                'predicted using only data from before its event, with no fights left out. Generated after the fact, so it is a fair test but '
+                'not a pre-fight record.</div>')
+    sb["running_accuracy"] = pd.to_numeric(sb.running_accuracy)
+    last = sb.iloc[-1]
+    module_html(figs([(f"{int(last.total_fights):,}", "Fights scored"), (f"{last.running_accuracy:.1%}", "Accuracy so far"), ("50%", "Coin flip")]))
+    line_df = sb.assign(event_date=pd.to_datetime(sb.event_date))[["event_date", "running_accuracy"]]
+    base = alt.Chart(line_df).encode(x=alt.X("event_date:T", title=None, axis=alt.Axis(format="%Y", labelOverlap=True)))
+    yenc = alt.Y("running_accuracy:Q", scale=alt.Scale(domain=[0.4, 0.8], clamp=True),
+                 axis=alt.Axis(format="%", title=None, values=[0.4, 0.5, 0.6, 0.7, 0.8]))
+    area = base.mark_area(opacity=.07, color=INK, clip=True).encode(y=yenc)
+    line = base.mark_line(color=INK, strokeWidth=2.5, clip=True).encode(y=yenc)
+    rule = alt.Chart(pd.DataFrame({"running_accuracy": [0.5]})).mark_rule(color=ACCENT, strokeDash=[6, 5], strokeWidth=2).encode(y=yenc)
+    module_html('<div class="note" style="margin:0 0 4px">Running accuracy by event. The dashed red line is a coin flip.</div>')
+    st.altair_chart(style_chart((area + line + rule).properties(height=300)), theme=None)
+
+    tiers = q("SELECT tier, fights, accuracy FROM v2_tier_accuracy WHERE method = 'model'")
+    order = {"full": 0, "limited": 1, "debut": 2}
+    names = {"full": "Both have 3+ UFC fights", "limited": "A fighter has 1-2", "debut": "A fighter is a debut"}
+    tiers = tiers.sort_values("tier", key=lambda c: c.map(order))
+    module_html('<div class="sect"><h3>Accuracy by how much history the fighters have</h3></div>'
+                + figs([(f"{float(t.accuracy):.0%}", f"{names.get(t.tier, t.tier)} ({int(t.fights):,} fights)") for t in tiers.itertuples()])
+                + '<div class="note">Fights with less history are harder, so those picks are less reliable.</div>')
+
+    cb = q("SELECT confidence_bucket, fights, accuracy FROM v2_confidence_buckets ORDER BY confidence_bucket")
+    cb["accuracy"] = pd.to_numeric(cb.accuracy)
+    cb["label"] = cb.confidence_bucket.str[3:].str.replace(" pct", "%", regex=False).str.replace(r"\+%$", "%+", regex=True)
+    cb["hi"] = [i >= 3 for i in range(len(cb))]
+    module_html('<div class="sect"><h3>Accuracy by how confident the model was</h3></div>')
+    bars = alt.Chart(cb).mark_bar(size=54).encode(
+        x=alt.X("label:N", sort=None, title=None, axis=alt.Axis(labelAngle=0)),
+        y=alt.Y("accuracy:Q", scale=alt.Scale(domain=[0, 1]), axis=alt.Axis(format="%", title=None)),
+        color=alt.Color("hi:N", scale=alt.Scale(domain=[False, True], range=[INK, ACCENT]), legend=None),
+        tooltip=["label", alt.Tooltip("accuracy:Q", format=".0%"), "fights"])
+    text = bars.mark_text(dy=-9, color=INK, fontWeight="bold", font="IBM Plex Mono, monospace").encode(text=alt.Text("accuracy:Q", format=".0%"), color=alt.value(INK))
+    st.altair_chart(style_chart((bars + text).properties(height=260)), theme=None)
+    lo, hi = cb.accuracy.min(), cb.accuracy.max()
+    module_html(f'<div class="note">Accuracy rises with confidence: from about {lo:.0%} for the closest calls to about {hi:.0%} for the most '
+                'confident picks (65% and up in red). The very top picks run a few points below the number they state, so a stated 80% is '
+                'closer to 77% in practice.</div>')
+
+    yr = q("SELECT year, fights, accuracy FROM v2_year_accuracy ORDER BY year")
+    yr["accuracy"] = pd.to_numeric(yr.accuracy)
+    module_html('<div class="sect"><h3>Accuracy by year</h3></div>')
+    ybars = alt.Chart(yr).mark_bar(size=22, color=INK).encode(
+        x=alt.X("year:O", title=None, axis=alt.Axis(labelAngle=0)),
+        y=alt.Y("accuracy:Q", scale=alt.Scale(domain=[0.4, 0.8], clamp=True), axis=alt.Axis(format="%", title=None)),
+        tooltip=["year", alt.Tooltip("accuracy:Q", format=".0%"), "fights"])
+    yrule = alt.Chart(pd.DataFrame({"y": [0.5]})).mark_rule(color=ACCENT, strokeDash=[6, 5], strokeWidth=2).encode(y="y:Q")
+    st.altair_chart(style_chart((ybars + yrule).properties(height=220)), theme=None)
+    module_html('<div class="note">Single years swing by several points because each has only a few hundred fights.</div>')
+
+    old = q("""SELECT COUNT(*) AS n, SUM(correct) AS c FROM upcoming_predictions WHERE correct IS NOT NULL""")
+    if len(old) and not isnull(old.iloc[0].n) and int(old.iloc[0].n) > 0:
+        module_html(f'<div class="note">Model v1 (the first version, which skipped fights with limited history) has {int(old.iloc[0].n)} graded locked picks, '
+                    f'{int(old.iloc[0].c)} right. Version 2 replaced it.</div>')
+
+
+# ------------------------------------------------------------------------------------------------
+# layout
+# ------------------------------------------------------------------------------------------------
+def main():
+    st.markdown(CSS, unsafe_allow_html=True)
+    if get_engine() is None:
+        st.error("The app isn't connected to a database (DATABASE_URL is missing).")
+        st.stop()
+    newest = None
+    try:
+        newest = q("SELECT MAX(event_date) AS d FROM fights").iloc[0, 0]
+    except Exception:
+        pass
+    today = date.today()
+    module_html(f'<div class="mast"><div class="top"><div class="brand disp">UFC Fight Predictor</div>'
+                f'<div class="dateline mono">{esc(today.strftime("%A, %B %d, %Y"))} &nbsp;·&nbsp; Results through {esc(f_date(newest))}</div></div></div>')
+    page = st.radio("Navigate", ["Upcoming", "Past events", "Fighters", "Track record"],
+                    horizontal=True, label_visibility="collapsed")
+    try:
+        {"Upcoming": page_upcoming, "Past events": page_past, "Fighters": page_fighters,
+         "Track record": page_track}[page]()
+    except (sa.exc.SQLAlchemyError, RuntimeError):
+        st.error("Couldn't load data right now. If the database was idle it may need a few seconds to wake up; "
+                 "refresh the page and try again.")
+    module_html(f'<div class="foot">{esc(DISCLAIMER)}</div>')
+
+
+main()

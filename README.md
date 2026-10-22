@@ -40,7 +40,9 @@ The Power BI file is not included (it contains a database address). `docs/powerb
 4. **Database** (`04_postgres_sql`): load the data into Postgres and rebuild the same features as **SQL window functions** (`sql/features.sql`), verified to match the pandas version exactly.
 5. **Scoring** (`pipeline/predict.py`): for each new fight, train on all earlier fights, predict, and log whether the pick was right (`sql/predictions.sql` defines the table and views Power BI reads).
 6. **Updating** (`pipeline/update_from_csv.py`): append new fights from the latest copy of the dataset.
+6b. **Model v2** (`pipeline/model_v2.py`): the current model. It is trained on every earlier fight (not just those where both fighters had 3+ UFC fights), pulls thin small-sample stats toward the average, adds an Elo rating and the level of opponents faced, and adds age and layoff curves. It gives a pick for **every** fight, past and upcoming, tagged `full`, `limited` (a fighter has 1-2 UFC fights) or `debut`. In walk-forward testing (each year predicted from earlier years only) it scored about 61.4% over 2014-2026 against 60.3% for v1, with better-calibrated probabilities.
 7. **Upcoming cards** (`pipeline/upcoming.py`): load an announced card from a CSV, compute each fighter's features as of fight night with the same SQL, make the prediction **before the event**, lock it with a timestamp, and grade it once the real result arrives. Late card changes (an opponent swap, a cancelled bout) are handled without touching predictions already made.
+8. **Web app** (`app/streamlit_app.py`): a shareable Streamlit app with an upcoming-card page (face-offs, locked picks, tale of the tape), past events, fighter profiles and comparison, and the track record. It only reads from the database, through a read-only user (`sql/readonly_role.sql`).
 
 ## Problems I found and fixed
 
@@ -55,7 +57,7 @@ The Power BI file is not included (it contains a database address). `docs/powerb
 - The scoreboard on the dashboard is still an *after-the-fact* backtest (every prediction uses only earlier data, but is generated after the result). The pre-fight pipeline (`upcoming.py`) builds a genuinely locked record from here on; cards are entered by hand because ufcstats.com can't be scraped.
 - Fighter names differ between sources (for example "Cameron" vs "Cam"), so new cards need a small name-matching step. It stops and shows suggestions rather than guessing.
 - History is UFC-only: a fighter's career before the UFC isn't in the data.
-- Only about 45% of fights have enough history to score.
+- Debuts and fighters with 1-2 UFC fights get picks, but they are less reliable (about 59-61% right in testing vs 62% for fighters with 3+ fights). For debutants who are not in the dataset yet, the model does not know their age or size.
 - The dataset has no betting odds, so there is no comparison against the market.
 - Small per-event samples: accuracy for a single card is very noisy.
 
@@ -92,6 +94,20 @@ The Power BI file is not included (it contains a database address). `docs/powerb
    After the event, once the dataset includes it: run `update_from_csv.py` as above, then `python pipeline/upcoming.py grade`.
    Names that don't match your data are listed with suggestions; add a line to `upcoming/aliases.csv` (use `NEW` for a fighter with no UFC history).
 
+7. **Run the web app locally** (with a read-only `DATABASE_URL` set, see `sql/readonly_role.sql`):
+   ```
+   pip install -r app/requirements.txt
+   streamlit run app/streamlit_app.py
+   ```
+
+8. **Model v2** (use the owner database string; these write to the database):
+   ```
+   python pipeline/model_v2.py setup
+   python pipeline/model_v2.py backtest        # a pick for every past fight (a few minutes the first time)
+   python pipeline/model_v2.py predict         # picks for loaded upcoming cards, locked before the event
+   python pipeline/model_v2.py grade           # after the dataset includes the event
+   ```
+
 Never commit a connection string. This repo's `.gitignore` excludes `data/`, `.env` and Power BI files.
 
 ## Project structure
@@ -106,6 +122,12 @@ sql/predictions.sql         prediction table and dashboard views
 pipeline/predict.py         score fights, log results
 pipeline/update_from_csv.py add new fights from the dataset
 pipeline/upcoming.py        predict announced cards before they happen, lock and grade them
+pipeline/model_v2.py        model v2: a pick for every fight (backtest, upcoming, grading)
+sql/model_v2.sql            tables and views for model v2
+app/streamlit_app.py        the shareable web app
+app/requirements.txt        packages the web app needs
+.streamlit/config.toml       the web app's theme settings (paper and ink)
+sql/readonly_role.sql       read-only database user for the web app
 upcoming/ufc-333.csv        an example announced card
 upcoming/aliases.csv        card name -> dataset name fixes
 docs/powerbi_dashboard.md   how the dashboard is built
@@ -114,7 +136,7 @@ docs/powerbi_dashboard.md   how the dashboard is built
 ## Roadmap
 
 - Publish the pre-fight predictions and track record on a shareable page.
-- A shareable web app: browse past and upcoming events, compare fighters, see the model's pick.
+- Deploy the web app, and add a head-to-head predictor for any two fighters.
 - Automated updates.
 
 ## Data and credits
