@@ -42,6 +42,7 @@ The Power BI file is not included (it contains a database address). `docs/powerb
 6. **Updating** (`pipeline/update_from_csv.py`): append new fights from the latest copy of the dataset.
 6b. **Model v2** (`pipeline/model_v2.py`): the current model. It is trained on every earlier fight (not just those where both fighters had 3+ UFC fights), pulls thin small-sample stats toward the average, adds an Elo rating and the level of opponents faced, and adds age and layoff curves. It gives a pick for **every** fight, past and upcoming, tagged `full`, `limited` (a fighter has 1-2 UFC fights) or `debut`. In walk-forward testing (each year predicted from earlier years only) it scored about 61.4% over 2014-2026 against 60.3% for v1, with better-calibrated probabilities.
 7. **Upcoming cards** (`pipeline/upcoming.py`): load an announced card from a CSV, compute each fighter's features as of fight night with the same SQL, make the prediction **before the event**, lock it with a timestamp, and grade it once the real result arrives. Late card changes (an opponent swap, a cancelled bout) are handled without touching predictions already made.
+6c. **Model v3** (`pipeline/model_v3.py`): model v2 plus the betting market. A small stacker combines v2's probability with the bookmaker's probability (margin removed), trained only on earlier fights. On 5,279 fights from 2016 to 2026 (each pick made using only earlier fights): v2 alone 61.8%, the opening line alone 64.9%, v2 + the opening line **65.4%**. The gain is largest for debutants (59% to 67%). Official point-in-time rankings were tested and added nothing. The line is used only as a forecasting input: this is not betting advice and the app never shows odds. Picks are two-stage: the v2 pick is locked when a card is announced, and the v3 pick is locked once a line is loaded. Neither changes.
 8. **Web app** (`app/streamlit_app.py`): a shareable Streamlit app with an upcoming-card page (face-offs, locked picks, tale of the tape), past events, fighter profiles and comparison, and the track record. It only reads from the database, through a read-only user (`sql/readonly_role.sql`).
 
 ## Problems I found and fixed
@@ -108,6 +109,26 @@ The Power BI file is not included (it contains a database address). `docs/powerb
    python pipeline/model_v2.py grade           # after the dataset includes the event
    ```
 
+9. **Model v3** (owner database string). Download the historical odds once (it is not stored in this repo):
+   ```
+   git clone --depth 1 https://github.com/nlbair/ufc-data.git data/nlbair
+   python pipeline/model_v3.py setup
+   python pipeline/model_v3.py load-odds --csv data/nlbair/data/ufc_all_fights_wide.csv
+   python pipeline/model_v3.py backtest
+   ```
+   For an announced card, once its lines are out, write a small file (American odds, names as in the card file):
+   ```
+   fighter_a,fighter_b,odds_a,odds_b
+   Name One,Name Two,-150,+130
+   ```
+   then check it and save it, and lock the market-informed picks:
+   ```
+   python pipeline/model_v3.py odds --csv upcoming/odds-CARD.csv --dry-run
+   python pipeline/model_v3.py odds --csv upcoming/odds-CARD.csv
+   python pipeline/model_v3.py predict
+   ```
+   After the event (and after `model_v2.py grade`): `python pipeline/model_v3.py grade`.
+
 Never commit a connection string. This repo's `.gitignore` excludes `data/`, `.env` and Power BI files.
 
 ## Project structure
@@ -123,7 +144,9 @@ pipeline/predict.py         score fights, log results
 pipeline/update_from_csv.py add new fights from the dataset
 pipeline/upcoming.py        predict announced cards before they happen, lock and grade them
 pipeline/model_v2.py        model v2: a pick for every fight (backtest, upcoming, grading)
+pipeline/model_v3.py        model v3: v2 plus the betting market
 sql/model_v2.sql            tables and views for model v2
+sql/model_v3.sql            tables and views for model v3
 app/streamlit_app.py        the shareable web app
 app/requirements.txt        packages the web app needs
 .streamlit/config.toml       the web app's theme settings (paper and ink)
@@ -142,3 +165,7 @@ docs/powerbi_dashboard.md   how the dashboard is built
 ## Data and credits
 
 Fight data: the Kaggle dataset `scarekrow/ufc-data`, originally collected from ufcstats.com. It is independently collected and not endorsed by the UFC or ufcstats.com. Its ranking columns are snapshots at scrape time, so this project doesn't use them.
+
+Betting lines (model v3): the UFC Data set by N. Bair, version 0.1.1, licensed CC BY 4.0 (https://github.com/nlbair/ufc-data). It was built from ufcstats.com, MMA Decisions, BestFightOdds, the Kaggle dataset `martj42/ufc-rankings` and the UFCalendar rankings API; those sources should be credited as well. Cite: Bair, N. (2026). *UFC Data: scorecards, round statistics, and betting odds, 2013 to 2026* (Version 0.1.1) [Data set]. Zenodo. https://doi.org/10.5281/zenodo.23458636. Changes made here: only the fight id, fighter ids and names, and the opening and closing win probabilities were used. This project is independent and is not affiliated with or endorsed by the UFC.
+
+Two checks worth knowing about: the `ranking` column in the Kaggle file used for fights is a snapshot of today's rankings (it leaks future results, so it is not used), and its `odds` columns are empty. The Bair dataset's rankings are the official board from before each event, and were tested: they add nothing once the model has Elo and records.

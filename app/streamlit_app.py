@@ -184,7 +184,8 @@ def _make_engine(url: str):
     for prefix in ("postgres://", "postgresql://"):
         if url.startswith(prefix):
             url = "postgresql+psycopg2://" + url[len(prefix):]
-    return sa.create_engine(url, pool_pre_ping=True)
+    # connect_timeout: a database that does not answer shows the error message instead of an endless blank page
+    return sa.create_engine(url, pool_pre_ping=True, connect_args={"connect_timeout": 12})
 
 
 def get_engine():
@@ -205,6 +206,20 @@ def q(sql: str, params: dict | None = None) -> pd.DataFrame:
         raise RuntimeError("DATABASE_URL is not set")
     with engine.connect() as conn:
         return pd.read_sql(sa.text(sql), conn, params=params or {})
+
+
+def has_v3() -> bool:
+    try:
+        r = q("""SELECT to_regclass('public.upcoming_picks_v3') IS NOT NULL AS a, to_regclass('public.fight_picks_v3') IS NOT NULL AS b,
+                        to_regclass('public.v3_summary') IS NOT NULL AS c""")
+        return bool(r.a.iloc[0] and r.b.iloc[0] and r.c.iloc[0])
+    except Exception:
+        return False
+
+
+NO_V3_UPCOMING = """(SELECT NULL::text AS bout_id, NULL::float8 AS p_a_wins, NULL::text AS predicted_winner, NULL::float8 AS confidence,
+                     NULL::timestamptz AS predicted_at, NULL::text AS actual_winner, NULL::int AS correct WHERE false)"""
+NO_V3_PAST = """(SELECT NULL::text AS fight_url, NULL::text AS predicted_winner, NULL::float8 AS confidence, NULL::int AS correct WHERE false)"""
 
 
 # ------------------------------------------------------------------------------------------------
@@ -371,6 +386,13 @@ def tier_note(tier) -> str:
     return f'<div class="note" style="margin-top:6px">{esc(TIER_TEXT[tier])}{esc(extra)}</div>'
 
 
+def src_tag(r) -> str:
+    src = getattr(r, "pick_src", None)
+    if isnull(src):
+        return ""
+    return f'<span class="tag" style="margin:0 8px 0 0">{"Market-informed" if src == "market" else "Model-only"}</span>'
+
+
 def pick_parts(r):
     """(probability scale, verdict text, picked_a, picked_b)"""
     picked_a = (not isnull(r.predicted_winner)) and r.predicted_winner == r.fighter_a
@@ -379,8 +401,12 @@ def pick_parts(r):
     if not isnull(r.p_a_wins):
         scale = scale_html(r.p_a_wins)
         stamp = pd.Timestamp(r.predicted_at).strftime("%b %d, %Y, %H:%M UTC")
-        verdict = (f'The model leans <b>{esc(r.predicted_winner)}</b>, {float(r.confidence):.0%}. '
+        verdict = (src_tag(r) + f'The model leans <b>{esc(r.predicted_winner)}</b>, {float(r.confidence):.0%}. '
                    f'<i>{lean(float(r.confidence))}.</i><span class="stamp mono">Locked {stamp}</span>') + tier_note(r.tier)
+        v2w = getattr(r, "v2_winner", None)
+        if getattr(r, "pick_src", None) == "market" and not isnull(v2w) and v2w != r.predicted_winner:
+            verdict += (f'<div class="note" style="margin-top:4px">The model-only pick was {esc(v2w)} ({float(r.v2_conf):.0%}); '
+                        f'the betting market shifted it.</div>')
     else:
         verdict = '<span class="muted">Prediction not made yet.</span>'
     if not isnull(r.actual_winner):
@@ -414,7 +440,8 @@ def prow_html(r, rec: dict) -> str:
     num = f"{int(r.bout_order):02d}" if not isnull(r.bout_order) else ""
     small = ""
     if not isnull(r.predicted_winner):
-        tag = "" if isnull(r.tier) or r.tier == "full" else f", {r.tier} data"
+        bits = ([] if isnull(r.tier) or r.tier == "full" else [f"{r.tier} data"]) + (["market-informed"] if getattr(r, "pick_src", None) == "market" else [])
+        tag = (", " + ", ".join(bits)) if bits else ""
         small = f'<div class="small">Leans <b>{esc(r.predicted_winner)}</b>, {float(r.confidence):.0%} <i class="muted">({lean(float(r.confidence)).lower()}{esc(tag)})</i></div>'
     if not isnull(r.actual_winner):
         small += f'<div class="small">{mark(int(r.correct) == 1, "Right" if int(r.correct) == 1 else "Wrong")} &nbsp;{esc(r.actual_winner)} won</div>'
@@ -442,13 +469,22 @@ def page_upcoming():
     choice = st.selectbox("Choose a card", labels, index=0)
     ev = ordered.iloc[labels.index(choice)]
 
+    v3 = has_v3()
+    p3_src = "upcoming_picks_v3" if v3 else NO_V3_UPCOMING
     bouts = q(f"""
         SELECT u.bout_id, u.bout_order, u.weight_class, u.title_fight, u.status AS bout_status,
                u.fighter_a_name AS fighter_a, u.fighter_b_name AS fighter_b, u.fighter_a_url, u.fighter_b_url,
-               p.p_a_wins, p.predicted_winner, p.confidence, p.predicted_at, p.tier, p.method,
-               p.actual_winner, p.correct, p.a_prior_fights, p.b_prior_fights, {STAT_COLS}
+               COALESCE(p3.p_a_wins, p.p_a_wins) AS p_a_wins, COALESCE(p3.predicted_winner, p.predicted_winner) AS predicted_winner,
+               COALESCE(p3.confidence, p.confidence) AS confidence, COALESCE(p3.predicted_at, p.predicted_at) AS predicted_at,
+               p.tier, p.method,
+               CASE WHEN p3.bout_id IS NOT NULL THEN 'market' WHEN p.bout_id IS NOT NULL THEN 'model' END AS pick_src,
+               p.predicted_winner AS v2_winner, p.confidence AS v2_conf,
+               CASE WHEN p3.bout_id IS NOT NULL THEN p3.actual_winner ELSE p.actual_winner END AS actual_winner,
+               CASE WHEN p3.bout_id IS NOT NULL THEN p3.correct ELSE p.correct END AS correct,
+               p.a_prior_fights, p.b_prior_fights, {STAT_COLS}
         FROM upcoming_fights u
         LEFT JOIN upcoming_picks_v2 p ON p.bout_id = u.bout_id
+        LEFT JOIN {p3_src} p3 ON p3.bout_id = u.bout_id
         LEFT JOIN upcoming_model_rows m ON m.bout_id = u.bout_id
         WHERE u.event_name = :e AND u.event_date = :d
         ORDER BY u.bout_order""", {"e": ev.event_name, "d": ev.event_date})
@@ -490,12 +526,13 @@ def page_upcoming():
     graded = live[live.correct.notna()]
     n_picks = int(live.p_a_wins.notna().sum())
     n_thin = int(live.tier.isin(["limited", "debut"]).sum())
+    n_mkt = int((live.pick_src == "market").sum())
     right = f"{int(graded.correct.sum())} of {len(graded)}" if len(graded) else "waiting for results"
     when = pd.Timestamp(ev.event_date).strftime("%A, %B %d, %Y")
     module_html(f'<div class="hero"><div class="kicker mono">{esc(days_label(ev.event_date, today))} &nbsp;·&nbsp; {esc(when)}</div>'
                 f'<h1>{esc(ev.event_name)}</h1>'
                 f'<div class="facts"><span><b>{len(live)}</b> bouts</span><span><b>{n_picks}</b> model picks</span>'
-                f'<span><b>{n_thin}</b> on limited data</span><span>Picks right: <b>{esc(right)}</b></span></div>'
+                f'<span><b>{n_mkt}</b> market-informed</span><span><b>{n_thin}</b> on limited data</span><span>Picks right: <b>{esc(right)}</b></span></div>'
                 f'<div class="aside">Left and right is just the order on the card, not the favourite. Each pick is saved with a timestamp '
                 f'before the event and never changed.</div></div>')
     rows = list(live.itertuples())
@@ -525,13 +562,18 @@ def page_past():
     labels = [f"{r.event_date.strftime('%b %d')}  -  {r.event_name}  ({int(r.fights)} fights)" for r in sub.itertuples()]
     choice = c2.selectbox("Event", labels, index=0)
     row = sub.iloc[labels.index(choice)]
-    fights = q("""
+    p3_src = "fight_picks_v3" if has_v3() else NO_V3_PAST
+    fights = q(f"""
         SELECT f.weight_class, f.title_fight, w.fighter_name AS winner, l.fighter_name AS loser, f.result,
-               f.finish_round, f.finish_time, p.predicted_winner, p.confidence, p.correct, p.tier, p.method
+               f.finish_round, f.finish_time,
+               COALESCE(p3.predicted_winner, p.predicted_winner) AS predicted_winner, COALESCE(p3.confidence, p.confidence) AS confidence,
+               CASE WHEN p3.fight_url IS NOT NULL THEN p3.correct ELSE p.correct END AS correct, p.tier, p.method,
+               CASE WHEN p3.fight_url IS NOT NULL THEN 'market' END AS src
         FROM fights f
         JOIN fighter_fights w ON w.fight_url = f.fight_url AND w.won = 1
         JOIN fighter_fights l ON l.fight_url = f.fight_url AND l.won = 0
         LEFT JOIN fight_picks_v2 p ON p.fight_url = f.fight_url
+        LEFT JOIN {p3_src} p3 ON p3.fight_url = f.fight_url
         WHERE f.event_name = :e AND f.event_date = :d
         ORDER BY f.title_fight DESC, f.fight_url""", {"e": row.event_name, "d": row.event_date.date()})
     first_model = q("SELECT MIN(event_date) AS d FROM fight_picks_v2 WHERE method = 'model'").iloc[0, 0]
@@ -549,6 +591,8 @@ def page_past():
                 bits.append(f"{r.tier} data")
             if r.method == "early_rule":
                 bits.append("early-era rule")
+            if getattr(r, "src", None) == "market":
+                bits.append("market-informed")
             tag = f' <span class="muted small">· {esc(", ".join(bits))}</span>' if bits else ""
             model = mark(ok, f"{str(r.predicted_winner)} ({float(r.confidence):.0%})") + tag
         body.append(f'<div class="res"><div class="div">{esc(f_text(r.weight_class))}{title}</div>'
@@ -562,7 +606,8 @@ def page_past():
                 f'<div class="facts"><span><b>{len(fights)}</b> fights</span>{model_fact}</div></div>'
                 f'<div style="margin-top:8px">{"".join(body)}</div>'
                 f'<div class="note">Every pick here is an after-the-fact test: the model is retrained using only fights from before the event. '
-                f'Fights with a debut or newcomer carry less information, so their picks are less reliable.{esc(early)}</div>')
+                f'Fights with a debut or newcomer carry less information, so their picks are less reliable.{esc(early)}'
+                f'{" From 2016 on, picks also use the fight’s opening betting line where one exists (market-informed)." if has_v3() else ""}</div>')
 
 
 # ------------------------------------------------------------------------------------------------
@@ -686,6 +731,13 @@ def page_track():
         module_html('<div class="note">No locked predictions have been graded yet. The first ones appear after the next card finishes and '
                     'the dataset updates (usually a day or two).</div>')
 
+    if has_v3():
+        l3 = q("""SELECT COUNT(*) AS n, COUNT(*) FILTER (WHERE correct IS NOT NULL) AS g, COALESCE(SUM(correct), 0) AS c,
+                         COUNT(*) FILTER (WHERE graded_at IS NULL AND status = 'locked') AS w FROM upcoming_picks_v3""").iloc[0]
+        if int(l3.n) > 0:
+            module_html(f'<div class="note">Market-informed picks (they also use the betting line): {int(l3.n)} locked, {int(l3.g)} graded '
+                        f'({int(l3.c)} right), {int(l3.w)} waiting for results. The picks above are the model-only ones.</div>')
+
     sb = q("SELECT event_date, event_name, fights, correct, running_accuracy, total_fights FROM v2_scoreboard_running ORDER BY event_date")
     if sb.empty:
         module_html('<div class="sect"><h3>Backtest scoreboard</h3></div>')
@@ -715,6 +767,39 @@ def page_track():
     module_html('<div class="sect"><h3>Accuracy by how much history the fighters have</h3></div>'
                 + figs([(f"{float(t.accuracy):.0%}", f"{names.get(t.tier, t.tier)} ({int(t.fights):,} fights)") for t in tiers.itertuples()])
                 + '<div class="note">Fights with less history are harder, so those picks are less reliable.</div>')
+
+    if has_v3():
+        s3 = q("SELECT fights, first_date, v2_accuracy, v3_accuracy, market_accuracy FROM v3_summary")
+        if len(s3) and not isnull(s3.iloc[0].fights) and int(s3.iloc[0].fights) > 0:
+            r3 = s3.iloc[0]
+            module_html('<div class="sect"><h3>Does the betting market add information?</h3></div>'
+                        f'<div class="aside" style="margin-top:0">Since {pd.Timestamp(r3.first_date).year}, on the {int(r3.fights):,} fights that have an opening '
+                        'betting line, each pick was made using only earlier fights. The line is used only as a forecasting input. This is not betting advice, '
+                        'and the app never shows odds.</div>'
+                        + figs([(f"{float(r3.v2_accuracy):.1%}", "Model-only (v2)"), (f"{float(r3.v3_accuracy):.1%}", "Model + market (v3)"),
+                                (f"{float(r3.market_accuracy):.1%}", "Opening line alone")]))
+            y3 = q("SELECT year, fights, v2_accuracy, v3_accuracy, market_accuracy FROM v3_year_accuracy ORDER BY year")
+            names3 = {"v2_accuracy": "Model-only (v2)", "v3_accuracy": "Model + market (v3)", "market_accuracy": "Opening line alone"}
+            long3 = y3.melt(id_vars=["year", "fights"], value_vars=list(names3), var_name="series", value_name="accuracy")
+            long3["accuracy"] = pd.to_numeric(long3.accuracy)
+            long3["series"] = long3.series.map(names3)
+            lines3 = alt.Chart(long3).mark_line(point=True, strokeWidth=2.5).encode(
+                x=alt.X("year:O", title=None, axis=alt.Axis(labelAngle=0)),
+                y=alt.Y("accuracy:Q", scale=alt.Scale(domain=[0.5, 0.78], clamp=True), axis=alt.Axis(format="%", title=None)),
+                color=alt.Color("series:N", scale=alt.Scale(domain=list(names3.values()), range=[MUTED, ACCENT, INK]),
+                                legend=alt.Legend(orient="bottom", title=None)),
+                tooltip=["series", "year", alt.Tooltip("accuracy:Q", format=".1%"), "fights"])
+            st.altair_chart(style_chart(lines3.properties(height=260)), theme=None)
+            t3 = q("SELECT tier, fights, v2_accuracy, v3_accuracy, market_accuracy FROM v3_tier_accuracy")
+            t3 = t3.sort_values("tier", key=lambda c: c.map({"full": 0, "limited": 1, "debut": 2}))
+            tn = {"full": "Both have 3+ UFC fights", "limited": "A fighter has 1-2", "debut": "A fighter is a debut"}
+            trs3 = "".join(f'<tr><td>{esc(tn.get(t.tier, t.tier))}</td><td class="mono">{int(t.fights):,}</td><td class="mono">{float(t.v2_accuracy):.1%}</td>'
+                           f'<td class="mono"><b>{float(t.v3_accuracy):.1%}</b></td><td class="mono">{float(t.market_accuracy):.1%}</td></tr>' for t in t3.itertuples())
+            module_html(f'<table class="hist"><tr><th>Fighters\' history</th><th>Fights</th><th>Model-only</th><th>Model + market</th><th>Line alone</th></tr>{trs3}</table>'
+                        '<div class="note">The market knows things stats cannot, such as injuries, camp news and pre-UFC records, so the gain is largest for '
+                        'debutants. Backtest picks use each fight’s opening line; picks for upcoming cards use the line loaded when they are locked. '
+                        'Betting lines: BestFightOdds, via the UFC Data set by N. Bair (CC BY 4.0, github.com/nlbair/ufc-data), built from ufcstats.com, '
+                        'MMA Decisions, BestFightOdds and public ranking archives.</div>')
 
     cb = q("SELECT confidence_bucket, fights, accuracy FROM v2_confidence_buckets ORDER BY confidence_bucket")
     cb["accuracy"] = pd.to_numeric(cb.accuracy)
