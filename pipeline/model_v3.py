@@ -19,6 +19,7 @@ Commands (use the OWNER database string, these write to the database)
                                                                # enter the current line for announced bouts
     python pipeline/model_v3.py predict [--within-days 2]      # lock v3 picks for bouts that have a line (before the event)
     python pipeline/model_v3.py grade                          # copy results over once `model_v2.py grade` has run
+    python pipeline/model_v3.py explain                        # store the "Why this pick?" reasons for locked picks that lack them
 
 Two-stage picks: the v2 pick is locked as soon as a card is announced (model_v2.py predict). Once a line is loaded, the v3 pick
 is locked too. Neither is ever changed. The app shows v3 when it exists and v2 otherwise.
@@ -81,6 +82,19 @@ def fit_stacker(T: pd.DataFrame):
 def stack_predict(model, p_v2_a, market_a) -> np.ndarray:
     X = pd.DataFrame({"x_model": logit(p_v2_a), "x_market": logit(market_a)})
     return model.predict_proba(X)[:, 1]
+
+
+def stack_weights(model) -> tuple[float, float]:
+    """The blend's weights on the log-odds scale: (statistical model, betting market). The pick is exactly
+    w_model * logit(model probability) + w_market * logit(market probability)."""
+    w = model[1].coef_[0] / model[0].scale_
+    return float(w[0]), float(w[1])
+
+
+def v3_reasons(name_a: str, name_b: str, p_v2_a: float, market_a: float, final_p: float, w_model: float, w_market: float) -> dict:
+    return {"a": name_a, "b": name_b, "model_p_a": round(float(p_v2_a), 4), "market_p_a": round(float(market_a), 4), "final_p_a": round(float(final_p), 4),
+            "w_model": round(w_model, 3), "w_market": round(w_market, 3), "market_share": round(w_market / (w_model + w_market), 3),
+            "model_c": round(w_model * float(logit(p_v2_a)), 4), "market_c": round(w_market * float(logit(market_a)), 4)}
 
 
 def training_table(engine) -> pd.DataFrame:
@@ -290,7 +304,9 @@ def cmd_predict(args) -> int:
         if len(tr) < MIN_STACK_TRAIN:
             log.error("Only %d fights with lines to learn from; need %d. Run load-odds and backtest.", len(tr), MIN_STACK_TRAIN)
             return 2
-        te["p_a_wins"] = stack_predict(fit_stacker(tr), te.p_v2_a.values, te.market_prob_a.values)
+        mdl = fit_stacker(tr)
+        te["p_a_wins"] = stack_predict(mdl, te.p_v2_a.values, te.market_prob_a.values)
+        te["w_model"], te["w_market"] = stack_weights(mdl)
         te["trained_on_fights"] = len(tr)
         out.append(te)
     R = pd.concat(out)
@@ -304,9 +320,44 @@ def cmd_predict(args) -> int:
         with engine.begin() as conn:
             R[cols].to_sql("upcoming_picks_v3", conn, if_exists="append", index=False, method="multi")
         log.info("Locked %d market-informed picks (the stacker learned from %d earlier fights)", len(R), int(R.trained_on_fights.iloc[0]))
+        try:                               # the reasons are a nicety: they must never be able to block a pick
+            v2.save_reasons(engine, "v3", [(r.bout_id, v3_reasons(r.fighter_a, r.fighter_b, r.p_v2_a, r.market_prob_a, r.p_a_wins, r.w_model, r.w_market))
+                                           for r in R.itertuples()])
+        except Exception as exc:
+            log.warning("could not store the reasons for the new picks (%s); run: python pipeline/model_v3.py explain", exc)
     for r in R.itertuples():
         v2w = r.fighter_a if r.p_v2_a >= 0.5 else r.fighter_b
         print(f"  {r.event_date}  {r.fighter_a:22s} vs {r.fighter_b:22s} -> {r.predicted_winner} {r.confidence:.0%}   (model-only said {v2w} {max(r.p_v2_a, 1 - r.p_v2_a):.0%}, market {max(r.market_prob_a, 1 - r.market_prob_a):.0%} on {r.fighter_a if r.market_prob_a >= .5 else r.fighter_b})")
+    return 0
+
+
+def cmd_explain(args) -> int:
+    """Store the 'two opinions' reasons for locked market-informed picks that have none, only when they reproduce the pick."""
+    engine = v2.make_engine()
+    with engine.begin() as conn:
+        conn.execute(sa.text(v2.REASONS_DDL))
+    todo = pd.read_sql(sa.text("""SELECT p.bout_id, p.event_date, p.fighter_a, p.fighter_b, p.p_v2_a, p.market_prob_a, p.p_a_wins FROM upcoming_picks_v3 p
+                                  LEFT JOIN pick_reasons r ON r.bout_id = p.bout_id AND r.version = 'v3'
+                                  WHERE r.bout_id IS NULL AND p.status = 'locked'"""), engine)
+    if todo.empty:
+        log.info("Every locked market-informed pick already has its reasons.")
+        return 0
+    T = training_table(engine)
+    items, skipped = [], 0
+    for D, grp in todo.groupby("event_date"):
+        mdl = fit_stacker(T[T.event_date < pd.Timestamp(D)])
+        wm, wk = stack_weights(mdl)
+        for r in grp.itertuples():
+            z = wm * float(logit(r.p_v2_a)) + wk * float(logit(r.market_prob_a))
+            p = 1 / (1 + np.exp(-z))
+            if abs(p - float(r.p_a_wins)) > 0.002:
+                skipped += 1
+                log.warning("not explained (the pick cannot be reproduced exactly): %s vs %s", r.fighter_a, r.fighter_b)
+                continue
+            items.append((r.bout_id, v3_reasons(r.fighter_a, r.fighter_b, r.p_v2_a, r.market_prob_a, r.p_a_wins, wm, wk)))
+    if items:
+        v2.save_reasons(engine, "v3", items)
+    log.info("Stored reasons for %d market-informed picks; %d could not be reproduced", len(items), skipped)
     return 0
 
 
@@ -343,10 +394,11 @@ def main(argv=None) -> int:
     p.add_argument("--within-days", type=int, default=None, help="only lock bouts whose event is at most this many days away")
     p.add_argument("--dry-run", action="store_true", help="show the picks that would be locked; write nothing")
     sub.add_parser("grade")
+    sub.add_parser("explain")
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     return {"setup": cmd_setup, "load-odds": cmd_load_odds, "backtest": cmd_backtest, "odds": cmd_odds, "predict": cmd_predict,
-            "grade": cmd_grade}[args.command](args)
+            "grade": cmd_grade, "explain": cmd_explain}[args.command](args)
 
 
 if __name__ == "__main__":

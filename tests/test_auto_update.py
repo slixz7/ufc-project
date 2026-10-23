@@ -262,3 +262,61 @@ def test_a_kaggle_sign_in_that_calls_exit_fails_only_its_step(monkeypatch):
     monkeypatch.setitem(sys.modules, "kaggle.api.kaggle_api_extended", mod)
     with pytest.raises(RuntimeError, match="did not accept the token"):
         au.kaggle_api()
+
+
+# ---------------------------------------------------------------------------------------------- "Why this pick?"
+import numpy as np  # noqa: E402
+import model_v2  # noqa: E402
+
+
+def test_every_model_input_belongs_to_exactly_one_reason_group():
+    expected = {f"d_{k}" for k in model_v2.SH} | {"d_age", "d_logn", "d_streak", "d_reach", "d_height", "d_layoff", "d_elo", "d_sos", "d_age35", "d_age2", "d_elo_x_new"}
+    grouped = [f for feats in model_v2.GROUPS.values() for f in feats]
+    assert set(grouped) == expected, "the model's inputs changed: update GROUPS in model_v2.py"
+    assert len(grouped) == len(set(grouped))
+
+
+def _row(**over):
+    base = {"age": 32.7, "streak": 10, "last3_win_rate": 1.0, "days_since_last": 217.0, "n_prev": 10, "prev_win_rate": 1.0, "elo": 1700.0, "sos": 1589.0,
+            "slpm": 3.91, "sapm": 2.8, "td_per15": 4.78, "td_def": 0.61, "sub_att_per15": 0.1, "ko_win_rate": 0.0, "reach": 183.0, "height": 170.0,
+            "sig_acc": 0.48, "kd_per15": 0.1, "ctrl_share": 0.36, "grappling_share": 0.3, "td_acc": 0.4, "sub_win_rate": 0.0}
+    base.update(over)
+    r = {}
+    for k, v in base.items():
+        r[f"{k}_a"] = v
+        r[f"{k}_b"] = v
+    r["age_a"], r["streak_a"], r["elo_a"] = 38.1, 2, 1714.0
+    r["elo_b"] = 1700.0
+    return pd.Series(r)
+
+
+def test_reasons_add_up_to_the_pick_and_are_ordered_by_size():
+    feats = [f for fs in model_v2.GROUPS.values() for f in fs]
+    c = pd.Series({f: 0.0 for f in feats})
+    c["d_age"], c["d_streak"], c["d_slpm"], c["d_td_per15"], c["d_sos"], c["d_height"] = -0.46, -0.31, 0.30, -0.27, 0.22, 0.02
+    d = model_v2.build_reasons(_row(), c, "Alex Volkanovski", "Movsar Evloev")
+    assert [f["key"] for f in d["factors"]] == ["age", "form", "striking", "wrestling", "schedule"]            # biggest push first; the size factor is too small to list
+    assert abs(sum(f["c"] for f in d["factors"]) + d["rest"] - d["total"]) < 1e-3                             # nothing is lost
+    assert abs(d["p_a"] - 1 / (1 + np.exp(-c.sum()))) < 1e-3
+    assert d["factors"][0]["toward"] == "B" and d["factors"][2]["toward"] == "A"
+    assert "Volkanovski 38.1" in d["factors"][0]["detail"] and "Evloev 32.7" in d["factors"][0]["detail"]
+
+
+def test_reasons_cope_with_a_debutant_who_has_no_data():
+    r = _row(age=np.nan, slpm=np.nan, sapm=np.nan, td_per15=np.nan, td_def=np.nan, last3_win_rate=np.nan, prev_win_rate=np.nan, n_prev=0, reach=np.nan, height=np.nan)
+    c = pd.Series({f: 0.1 for fs in model_v2.GROUPS.values() for f in fs})
+    d = model_v2.build_reasons(r, c, "Asaf Chopurov", "Colby Thicknesse")
+    text = " ".join(f["detail"] for f in d["factors"])
+    assert "–" in text and "no UFC fights yet" in text
+
+
+def test_the_blend_reasons_are_exact():
+    d = model_v3.v3_reasons("A One", "B Two", 0.59, 0.81, 0.83, 0.41, 0.99)
+    assert abs(d["market_share"] - 0.99 / 1.40) < 0.001
+    z = d["model_c"] + d["market_c"]
+    assert abs(1 / (1 + np.exp(-z)) - 0.83) < 0.01                                                            # 0.41 x logit(59%) + 0.99 x logit(81%) is about 83%
+
+
+def test_last_names_handle_suffixes():
+    assert model_v2.last_name("Alexander Volkanovski") == "Volkanovski"
+    assert model_v2.last_name("Raul Rosas Jr.") == "Rosas Jr."

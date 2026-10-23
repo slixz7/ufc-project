@@ -12,6 +12,7 @@ Look: a printed fight-night programme. Paper, black ink, one red accent, big typ
 from __future__ import annotations
 
 import html
+import json
 import os
 from datetime import date
 
@@ -161,7 +162,24 @@ label[data-testid="stRadioOption"][data-selected="true"] p {color:#171717; font-
 .ufc .note {color:var(--muted); font-style:italic; font-size:.9rem; margin-top:10px;}
 .ufc .foot {margin-top:42px; border-top:1px solid var(--ink); padding-top:10px; color:var(--muted); font-style:italic; font-size:.88rem;}
 
+/* why this pick */
+.ufc .why {margin-top:6px;}
+.ufc .two {display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; margin:10px 0 6px;}
+.ufc .two > div {border-top:2px solid var(--ink); padding-top:6px; font-size:1.08rem;}
+.ufc .two .k {display:block; font-family:'IBM Plex Mono','Courier New',monospace; font-size:.64rem; letter-spacing:.12em; text-transform:uppercase; color:var(--muted); margin-bottom:2px;}
+.ufc .fac {margin-top:8px;}
+.ufc .fac .hd {font-family:'IBM Plex Mono','Courier New',monospace; font-size:.68rem; letter-spacing:.12em; text-transform:uppercase; color:var(--muted); margin:10px 0 2px;}
+.ufc .fr {display:grid; grid-template-columns:150px 1fr 190px; gap:14px; align-items:center; padding:7px 0; border-bottom:1px solid var(--hair);}
+.ufc .fr .fl {font-family:'Barlow Condensed','Arial Narrow',Arial,sans-serif; font-weight:700; text-transform:uppercase; font-size:1.08rem; line-height:1.05;}
+.ufc .fr .fd {font-size:.84rem; color:var(--muted); line-height:1.3;}
+.ufc .fb {display:flex; align-items:center; gap:8px; font-family:'IBM Plex Mono','Courier New',monospace; font-size:.76rem; font-weight:600;}
+.ufc .fb .tr2 {flex:1; height:6px; background:rgba(23,23,23,.08); display:flex;}
+.ufc .fb.a .tr2 {justify-content:flex-start;} .ufc .fb.b .tr2 {justify-content:flex-end;}
+.ufc .fb i {display:block; height:100%;} .ufc .fb.a i {background:var(--ink);} .ufc .fb.b i {background:var(--accent);}
+.ufc .fb.a span {color:var(--ink);} .ufc .fb.b span {color:var(--accent);}
+.ufc .fr.rest {opacity:.75;}
 @media (max-width:760px) {
+  .ufc .two {grid-template-columns:1fr;} .ufc .fr {grid-template-columns:1fr; gap:3px;}
   .ufc .brand {font-size:1.9rem;} .ufc .main {--ln:2.3rem;}
   .ufc .bgrid {grid-template-columns:1fr; gap:0;}
   .ufc .prow .line {grid-template-columns:1fr; gap:6px;} .ufc .prow .num {display:none;}
@@ -355,6 +373,60 @@ def module_html(s: str):
     st.html(f'<div class="ufc">{s}</div>')
 
 
+REASONS: dict = {}          # bout_id -> {"v2": reasons, "v3": reasons}, filled by the Upcoming page for the card on screen
+
+
+def has_reasons() -> bool:
+    try:
+        return bool(q("SELECT to_regclass('public.pick_reasons') IS NOT NULL AS ok").ok.iloc[0])
+    except Exception:
+        return False
+
+
+def why_html(r, open_: bool = False) -> str:
+    """'Why this pick?': the two opinions (when the betting market was used) and what drove the statistical model."""
+    try:
+        rs = REASONS.get(getattr(r, "bout_id", None))
+        if not rs or isnull(r.predicted_winner):
+            return ""
+        v2d, v3d = rs.get("v2"), rs.get("v3")
+        last = lambda n: split_name(n)[1]
+        parts = []
+        if v3d and getattr(r, "pick_src", None) == "market":
+            side = lambda p: (r.fighter_a if p >= 0.5 else r.fighter_b, max(p, 1 - p))
+            (mk, mkp), (md, mdp), (fn, fp) = side(v3d["market_p_a"]), side(v3d["model_p_a"]), side(v3d["final_p_a"])
+            share = float(v3d["market_share"])
+            parts.append(f'<div class="two"><div><span class="k">Betting market</span><b>{esc(last(mk))}</b> {mkp:.0%}</div>'
+                         f'<div><span class="k">Statistical model</span><b>{esc(last(md))}</b> {mdp:.0%}</div>'
+                         f'<div><span class="k">Combined pick</span><b>{esc(last(fn))}</b> {fp:.0%}</div></div>'
+                         f'<div class="note" style="margin-top:2px">The pick blends the two opinions. The market carries about {share:.0%} of the weight and the '
+                         f'model {1 - share:.0%}, as learned from thousands of past fights. When they disagree, the pick leans toward the market and '
+                         f'its confidence drops.</div>')
+        if v2d and v2d.get("factors"):
+            mx = max([abs(f["c"]) for f in v2d["factors"]] + [0.35])
+            rows = []
+            for f in v2d["factors"]:
+                a_side = f["toward"] == "A"
+                who = r.fighter_a if a_side else r.fighter_b
+                rows.append(f'<div class="fr"><div class="fl">{esc(f["label"])}</div><div class="fd">{esc(f["detail"])}</div>'
+                            f'<div class="fb {"a" if a_side else "b"}"><div class="tr2"><i style="width:{min(100, abs(f["c"]) / mx * 100):.0f}%"></i></div>'
+                            f'<span>{esc(last(who))}</span></div></div>')
+            rest = float(v2d.get("rest", 0))
+            if abs(rest) >= 0.05:
+                a_side = rest > 0
+                rows.append(f'<div class="fr rest"><div class="fl">All the rest</div><div class="fd">the smaller factors added together</div>'
+                            f'<div class="fb {"a" if a_side else "b"}"><div class="tr2"><i style="width:{min(100, abs(rest) / mx * 100):.0f}%"></i></div>'
+                            f'<span>{esc(last(r.fighter_a if a_side else r.fighter_b))}</span></div></div>')
+            parts.append('<div class="fac"><div class="hd">What drives the statistical model\'s view (longer bar = bigger push)</div>' + "".join(rows) + "</div>")
+        if not parts:
+            return ""
+        parts.append('<div class="note">These are tendencies in past fights, using only the numbers listed. The model knows nothing about injuries, camps or '
+                     'how two styles fit together' + ("; the betting market, where used, may." if v3d else ".") + '</div>')
+        return f'<details{" open" if open_ else ""}><summary>Why this pick?</summary><div class="why">{"".join(parts)}</div></details>'
+    except Exception:
+        return ""                         # an explanation must never break the page
+
+
 def figs(items) -> str:
     return '<div class="figs">' + "".join(f'<div class="c"><div class="v">{esc(v)}</div><div class="l">{esc(l)}</div></div>' for v, l in items) + "</div>"
 
@@ -421,7 +493,7 @@ def main_event_html(r, rec: dict) -> str:
             f'<div class="duel">{side_html(r.fighter_a, rec.get(r.fighter_a_url, "UFC debut"), "a", pa)}<div class="vs">vs.</div>'
             f'{side_html(r.fighter_b, rec.get(r.fighter_b_url, "UFC debut"), "b", pb)}</div>'
             f'<div style="margin-top:20px">{scale}</div><div class="verdict">{verdict}</div>'
-            f'{tape_details(pd.Series(r._asdict()), r.fighter_a, r.fighter_b, open_=True)}</div>')
+            f'{why_html(r, True)}{tape_details(pd.Series(r._asdict()), r.fighter_a, r.fighter_b, open_=True)}</div>')
 
 
 def bout_html(r, rec: dict) -> str:
@@ -432,7 +504,7 @@ def bout_html(r, rec: dict) -> str:
             f'<div class="duel">{side_html(r.fighter_a, rec.get(r.fighter_a_url, "UFC debut"), "a", pa)}<div class="vs">vs.</div>'
             f'{side_html(r.fighter_b, rec.get(r.fighter_b_url, "UFC debut"), "b", pb)}</div>'
             f'<div style="margin-top:14px">{scale}</div><div class="verdict">{verdict}</div>'
-            f'{tape_details(pd.Series(r._asdict()), r.fighter_a, r.fighter_b)}</div>')
+            f'{why_html(r)}{tape_details(pd.Series(r._asdict()), r.fighter_a, r.fighter_b)}</div>')
 
 
 def prow_html(r, rec: dict) -> str:
@@ -450,7 +522,7 @@ def prow_html(r, rec: dict) -> str:
             f'{side_html(r.fighter_a, rec.get(r.fighter_a_url, "UFC debut"), "a", pa)}'
             f'<div class="mid"><div class="label" style="justify-content:center;margin:0 0 6px">{div}</div>{scale}{small}</div>'
             f'{side_html(r.fighter_b, rec.get(r.fighter_b_url, "UFC debut"), "b", pb)}</div>'
-            f'{tape_details(pd.Series(r._asdict()), r.fighter_a, r.fighter_b)}</div>')
+            f'{why_html(r)}{tape_details(pd.Series(r._asdict()), r.fighter_a, r.fighter_b)}</div>')
 
 
 def page_upcoming():
@@ -515,6 +587,11 @@ def page_upcoming():
         bouts[f"{side}_fin3"] = bouts[f"fighter_{side}_url"].map(lambda u: ctx.get(u, (None, None))[1])
     live = bouts[bouts.bout_status != "cancelled"]
     gone = bouts[bouts.bout_status == "cancelled"]
+    REASONS.clear()
+    if has_reasons():
+        rr = q("SELECT bout_id, version, reasons FROM pick_reasons WHERE bout_id = ANY(:ids)", {"ids": [str(x) for x in bouts.bout_id]})
+        for x in rr.itertuples():
+            REASONS.setdefault(x.bout_id, {})[x.version] = x.reasons if isinstance(x.reasons, dict) else json.loads(x.reasons)
 
     urls = list(set(live.fighter_a_url) | set(live.fighter_b_url))
     rec = {}

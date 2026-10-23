@@ -15,6 +15,7 @@ Commands (use the OWNER database string, these write to the database)
     python pipeline/model_v2.py backtest --rebuild    # throw the old backtest away and redo it
     python pipeline/model_v2.py predict               # picks for loaded upcoming cards (locked, never changed)
     python pipeline/model_v2.py grade                 # score locked picks once results are in the dataset
+    python pipeline/model_v2.py explain               # store the plain-language "Why this pick?" reasons for locked picks that lack them
 
 Every pick carries a tier: full (both fighters have 3+ UFC fights), limited (the less experienced has 1-2),
 debut (a fighter has none). Fights before the model had enough history to learn from (the first ~300) use a
@@ -26,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import difflib
+import json
 import logging
 import os
 import re
@@ -301,6 +303,126 @@ def picks_frame(P: pd.DataFrame, p_a: np.ndarray, method: str, trained: int) -> 
 
 
 # ----------------------------------------------------------------------------------------------
+# "Why this pick?": what pushed the model, in plain words. Computed at the moment a pick is locked and stored with it.
+# The model is a sum: every input adds or subtracts a little log-odds for fighter A, and the sum IS the pick. So the
+# reasons are exact, not an approximation, and they are checked to reproduce the stored probability before being saved.
+# ----------------------------------------------------------------------------------------------
+GROUPS = {
+    "age": ["d_age", "d_age35", "d_age2"],
+    "form": ["d_streak", "d_last3_win_rate", "d_layoff"],
+    "record": ["d_prev_win_rate", "d_logn"],
+    "rating": ["d_elo", "d_elo_x_new"],
+    "schedule": ["d_sos"],
+    "striking": ["d_slpm", "d_sapm", "d_sig_acc", "d_kd_per15"],
+    "wrestling": ["d_td_per15", "d_td_acc", "d_td_def", "d_ctrl_share", "d_grappling_share"],
+    "submissions": ["d_sub_att_per15", "d_sub_win_rate"],
+    "finishing": ["d_ko_win_rate"],
+    "size": ["d_reach", "d_height"],
+}
+LABELS = {"age": "Age", "form": "Recent form", "record": "UFC record", "rating": "Rating (Elo)", "schedule": "Strength of opposition", "striking": "Striking",
+          "wrestling": "Wrestling and control", "submissions": "Submissions", "finishing": "Finishing power", "size": "Size"}
+SUFFIXES = {"jr", "jr.", "sr", "sr.", "ii", "iii", "iv"}
+
+
+def last_name(name: str) -> str:
+    parts = str(name).split()
+    if len(parts) > 2 and parts[-1].lower() in SUFFIXES:
+        return " ".join(parts[-2:])
+    return parts[-1] if parts else str(name)
+
+
+def _nan(x) -> bool:
+    return x is None or (isinstance(x, float) and np.isnan(x)) or x is pd.NA
+
+
+def _num(x, nd=1) -> str:
+    return "–" if _nan(x) else f"{float(x):.{nd}f}"
+
+
+def _pct(x) -> str:
+    return "–" if _nan(x) else f"{float(x):.0%}"
+
+
+def _streak(x) -> str:
+    return "–" if _nan(x) or int(x) == 0 else (f"W{int(x)}" if int(x) > 0 else f"L{-int(x)}")
+
+
+def _inch(cm) -> str:
+    return "–" if _nan(cm) else f"{round(float(cm) / 2.54)}\""
+
+
+def _detail(g: str, r, la: str, lb: str) -> str:
+    a, b = (lambda k: r[f"{k}_a"]), (lambda k: r[f"{k}_b"])
+    if g == "age":
+        return f"{la} {_num(a('age'))}, {lb} {_num(b('age'))}"
+    if g == "form":
+        out = f"streak {la} {_streak(a('streak'))} / {lb} {_streak(b('streak'))}; last 3 fights {_pct(a('last3_win_rate'))} / {_pct(b('last3_win_rate'))}"
+        for who, d in ((la, a("days_since_last")), (lb, b("days_since_last"))):
+            if not _nan(d) and float(d) >= 365:
+                out += f"; {who} was off {int(float(d) // 30)} months"
+        return out
+    if g == "record":
+        side = lambda who, k: f"{who}: no UFC fights yet" if int(r[f"n_prev_{k}"]) == 0 else f"{who}: {int(r[f'n_prev_{k}'])} UFC fights, {_pct(r[f'prev_win_rate_{k}'])} wins"
+        return f"{side(la, 'a')}; {side(lb, 'b')}"
+    if g == "rating":
+        return f"Elo rating {la} {_num(r['elo_a'], 0)}, {lb} {_num(r['elo_b'], 0)} (it rises for beating strong opponents)"
+    if g == "schedule":
+        return f"average rating of past opponents: {la} {_num(r['sos_a'], 0)}, {lb} {_num(r['sos_b'], 0)}"
+    if g == "striking":
+        return f"{la} lands {_num(a('slpm'), 2)}/min, absorbs {_num(a('sapm'), 2)}; {lb} lands {_num(b('slpm'), 2)}/min, absorbs {_num(b('sapm'), 2)}"
+    if g == "wrestling":
+        return (f"takedowns per 15 min: {la} {_num(a('td_per15'), 2)}, {lb} {_num(b('td_per15'), 2)}; "
+                f"takedown defense: {la} {_pct(a('td_def'))}, {lb} {_pct(b('td_def'))}")
+    if g == "submissions":
+        return f"submission attempts per 15 min: {la} {_num(a('sub_att_per15'), 2)}, {lb} {_num(b('sub_att_per15'), 2)}"
+    if g == "finishing":
+        return f"KO/TKO wins as a share of fights: {la} {_pct(a('ko_win_rate'))}, {lb} {_pct(b('ko_win_rate'))}"
+    if g == "size":
+        return f"reach {la} {_inch(a('reach'))}, {lb} {_inch(b('reach'))}; height {la} {_inch(a('height'))}, {lb} {_inch(b('height'))}"
+    return ""
+
+
+def contributions(model, mu: dict, P: pd.DataFrame) -> pd.DataFrame:
+    """Log-odds each input adds for fighter A (negative = for fighter B). They sum exactly to the model's log-odds."""
+    X = design(P, mu)
+    Z = model[0].transform(X)
+    return pd.DataFrame(Z * model[1].coef_[0], index=P.index, columns=X.columns)
+
+
+def build_reasons(r, c: pd.Series, name_a: str, name_b: str) -> dict:
+    la, lb = last_name(name_a), last_name(name_b)
+    mapped = {f for feats in GROUPS.values() for f in feats}
+    factors = []
+    for g, feats in GROUPS.items():
+        val = float(sum(c.get(f, 0.0) for f in feats))
+        factors.append({"key": g, "label": LABELS[g], "c": round(val, 4), "toward": "A" if val > 0 else "B", "detail": _detail(g, r, la, lb)})
+    factors.sort(key=lambda f: -abs(f["c"]))
+    top = [f for f in factors if abs(f["c"]) >= 0.05][:5]
+    other = float(sum(v for k, v in c.items() if k not in mapped))
+    rest = float(sum(f["c"] for f in factors if f not in top)) + other
+    total = float(c.sum())
+    return {"a": name_a, "b": name_b, "total": round(total, 4), "p_a": round(float(1 / (1 + np.exp(-total))), 4),
+            "factors": top, "rest": round(rest, 4)}
+
+
+REASONS_DDL = """CREATE TABLE IF NOT EXISTS pick_reasons (
+    bout_id    TEXT NOT NULL,
+    version    TEXT NOT NULL,                 -- 'v2' (model-only) or 'v3' (market-informed)
+    reasons    JSONB NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    PRIMARY KEY (bout_id, version))"""
+
+
+def save_reasons(engine, version: str, items) -> int:
+    with engine.begin() as conn:
+        conn.execute(sa.text(REASONS_DDL))
+        for bout_id, d in items:
+            conn.execute(sa.text("INSERT INTO pick_reasons (bout_id, version, reasons) VALUES (:b, :v, CAST(:j AS jsonb)) "
+                                 "ON CONFLICT (bout_id, version) DO NOTHING"), {"b": bout_id, "v": version, "j": json.dumps(d)})
+    return len(items)
+
+
+# ----------------------------------------------------------------------------------------------
 # commands
 # ----------------------------------------------------------------------------------------------
 def cmd_setup(args) -> int:
@@ -385,6 +507,52 @@ def cmd_predict(args) -> int:
     log.info("Locked %d picks (model trained on %d fights)", len(pf), len(real))
     for r in pf.itertuples():
         print(f"  {r.event_date}  {r.fighter_a:24s} vs {r.fighter_b:24s} -> {r.predicted_winner} {r.confidence:.0%}  [{r.tier}]")
+    try:                                   # the reasons are a nicety: they must never be able to block a pick
+        C = contributions(model, mu, up)
+        save_reasons(engine, "v2", [(row.bout_id, build_reasons(row, C.loc[i], row.name_a, row.name_b)) for i, row in up.iterrows()])
+    except Exception as exc:
+        log.warning("could not store the reasons for the new picks (%s); run: python pipeline/model_v2.py explain", exc)
+    return 0
+
+
+def cmd_explain(args) -> int:
+    """Store 'Why this pick?' reasons for locked picks that have none. Each pick is re-created exactly as it was when it was
+    locked (only fights dated before the lock day, the same training set), and the reasons are saved only if they reproduce
+    the stored probability."""
+    engine = make_engine()
+    with engine.begin() as conn:
+        conn.execute(sa.text(REASONS_DDL))
+    todo = pd.read_sql(sa.text("""SELECT p.bout_id, p.p_a_wins, p.predicted_at FROM upcoming_picks_v2 p
+                                  LEFT JOIN pick_reasons r ON r.bout_id = p.bout_id AND r.version = 'v2'
+                                  WHERE r.bout_id IS NULL AND p.status = 'locked'"""), engine)
+    if todo.empty:
+        log.info("Every locked pick already has its reasons.")
+        return 0
+    history = load_history(engine)
+    done = skipped = 0
+    todo["lock_day"] = pd.to_datetime(todo.predicted_at).dt.tz_localize(None).dt.normalize()
+    for day, grp in todo.groupby("lock_day"):
+        asof = history[history.event_date < day]
+        extra = placeholders(engine, asof, only_ids=set(grp.bout_id))
+        if extra.empty:
+            skipped += len(grp)
+            continue
+        P = make_pairs(asof, extra)
+        up, real = P[P.is_up].copy(), P[~P.is_up]
+        model, mu = fit(real)
+        p_new = pd.Series(model.predict_proba(design(up, mu))[:, 1], index=up.index)
+        C = contributions(model, mu, up)
+        stored = dict(zip(grp.bout_id, grp.p_a_wins))
+        items = []
+        for i, row in up.iterrows():
+            bid = row.fight_url.replace("upcoming:", "", 1)
+            if bid not in stored or abs(float(p_new[i]) - float(stored[bid])) > 0.002:
+                skipped += 1
+                log.warning("not explained (the pick cannot be reproduced exactly): %s vs %s", row.name_a, row.name_b)
+                continue
+            items.append((bid, build_reasons(row, C.loc[i], row.name_a, row.name_b)))
+        done += save_reasons(engine, "v2", items) if items else 0
+    log.info("Stored reasons for %d picks; %d could not be reproduced and were left without reasons", done, skipped)
     return 0
 
 
@@ -448,9 +616,10 @@ def main(argv=None) -> int:
     p = sub.add_parser("predict")
     p.add_argument("--today", help="(testing only) pretend today is YYYY-MM-DD")
     sub.add_parser("grade")
+    sub.add_parser("explain")
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    return {"setup": cmd_setup, "backtest": cmd_backtest, "predict": cmd_predict, "grade": cmd_grade}[args.command](args)
+    return {"setup": cmd_setup, "backtest": cmd_backtest, "predict": cmd_predict, "grade": cmd_grade, "explain": cmd_explain}[args.command](args)
 
 
 if __name__ == "__main__":

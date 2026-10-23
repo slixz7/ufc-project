@@ -369,6 +369,7 @@ def step_v2(engine, today: date, rep: Report, dry_run: bool) -> None:
     rep.add("Model-only picks (v2)", f"{n} bouts needed a pick; model_v2 predict returned {rc}")
     if rc != 0:
         raise RuntimeError(f"model_v2 predict returned {rc}")
+    model_v2.main(["explain"])               # fills in any missing "Why this pick?" reasons (never blocks a pick)
 
 
 # ----------------------------------------------------------------------------------------------
@@ -528,6 +529,8 @@ def step_lock(engine, today: date, rep: Report, dry_run: bool, lock_days: int) -
     rep.add("Market-informed picks (v3)", f"events within {lock_days} days are locked with the latest line; model_v3 predict returned {rc}")
     if rc not in (0, None):
         raise RuntimeError(f"model_v3 predict returned {rc}")
+    if not dry_run:
+        model_v3.main(["explain"])           # fills in any missing "Why this pick?" reasons (never blocks a pick)
     with engine.connect() as conn:
         soon = conn.execute(sa.text("""SELECT COUNT(*) FROM upcoming_fights u LEFT JOIN upcoming_odds o USING (bout_id)
                                        WHERE u.status = 'scheduled' AND u.event_date > :t AND u.event_date <= :lim AND o.bout_id IS NULL"""),
