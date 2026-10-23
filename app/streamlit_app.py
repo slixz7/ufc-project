@@ -408,7 +408,8 @@ def why_html(r, open_: bool = False) -> str:
             for f in v2d["factors"]:
                 a_side = f["toward"] == "A"
                 who = r.fighter_a if a_side else r.fighter_b
-                rows.append(f'<div class="fr"><div class="fl">{esc(f["label"])}</div><div class="fd">{esc(f["detail"])}</div>'
+                net = ' <span class="muted">(net effect: the model also weighs related stats not shown here)</span>' if f.get("net") else ""
+                rows.append(f'<div class="fr"><div class="fl">{esc(f["label"])}</div><div class="fd">{esc(f["detail"])}{net}</div>'
                             f'<div class="fb {"a" if a_side else "b"}"><div class="tr2"><i style="width:{min(100, abs(f["c"]) / mx * 100):.0f}%"></i></div>'
                             f'<span>{esc(last(who))}</span></div></div>')
             rest = float(v2d.get("rest", 0))

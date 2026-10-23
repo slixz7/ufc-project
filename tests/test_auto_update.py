@@ -295,7 +295,7 @@ def test_reasons_add_up_to_the_pick_and_are_ordered_by_size():
     c = pd.Series({f: 0.0 for f in feats})
     c["d_age"], c["d_streak"], c["d_slpm"], c["d_td_per15"], c["d_sos"], c["d_height"] = -0.46, -0.31, 0.30, -0.27, 0.22, 0.02
     d = model_v2.build_reasons(_row(), c, "Alex Volkanovski", "Movsar Evloev")
-    assert [f["key"] for f in d["factors"]] == ["age", "form", "striking", "wrestling", "schedule"]            # biggest push first; the size factor is too small to list
+    assert [f["key"] for f in d["factors"]] == ["age", "results", "striking", "grappling", "competition"]      # biggest push first; the size factor is too small to list
     assert abs(sum(f["c"] for f in d["factors"]) + d["rest"] - d["total"]) < 1e-3                             # nothing is lost
     assert abs(d["p_a"] - 1 / (1 + np.exp(-c.sum()))) < 1e-3
     assert d["factors"][0]["toward"] == "B" and d["factors"][2]["toward"] == "A"
@@ -308,6 +308,23 @@ def test_reasons_cope_with_a_debutant_who_has_no_data():
     d = model_v2.build_reasons(r, c, "Asaf Chopurov", "Colby Thicknesse")
     text = " ".join(f["detail"] for f in d["factors"])
     assert "–" in text and "no UFC fights yet" in text
+
+
+def test_a_bar_that_opposes_every_number_beside_it_is_flagged_as_a_net_effect():
+    c = pd.Series({f: 0.0 for fs in model_v2.GROUPS.values() for f in fs})
+    c["d_elo"], c["d_sos"] = -0.5, -0.2                                      # the model's net effect favours B on "level of competition"
+    r = _row(elo=1500.0, sos=1500.0)
+    r["elo_a"], r["elo_b"], r["sos_a"], r["sos_b"] = 1700.0, 1500.0, 1650.0, 1500.0   # but A is ahead on BOTH numbers shown
+    d = model_v2.build_reasons(r, c, "A One", "B Two")
+    comp = next(f for f in d["factors"] if f["key"] == "competition")
+    assert comp["toward"] == "B" and comp["net"] is True
+    c["d_elo"], c["d_sos"] = 0.5, 0.2                                        # now the bar and the numbers agree
+    assert not next(f for f in model_v2.build_reasons(r, c, "A One", "B Two")["factors"] if f["key"] == "competition")["net"]
+
+
+def test_reasons_carry_a_schema_version_so_old_ones_can_be_rebuilt():
+    c = pd.Series({f: 0.1 for fs in model_v2.GROUPS.values() for f in fs})
+    assert model_v2.build_reasons(_row(), c, "A One", "B Two")["schema"] == model_v2.REASONS_SCHEMA
 
 
 def test_the_blend_reasons_are_exact():

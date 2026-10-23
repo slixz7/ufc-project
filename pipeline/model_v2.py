@@ -307,20 +307,21 @@ def picks_frame(P: pd.DataFrame, p_a: np.ndarray, method: str, trained: int) -> 
 # The model is a sum: every input adds or subtracts a little log-odds for fighter A, and the sum IS the pick. So the
 # reasons are exact, not an approximation, and they are checked to reproduce the stored probability before being saved.
 # ----------------------------------------------------------------------------------------------
+REASONS_SCHEMA = 2           # bump when the grouping changes: older stored reasons are rebuilt automatically by `explain`
 GROUPS = {
     "age": ["d_age", "d_age35", "d_age2"],
-    "form": ["d_streak", "d_last3_win_rate", "d_layoff"],
-    "record": ["d_prev_win_rate", "d_logn"],
-    "rating": ["d_elo", "d_elo_x_new"],
-    "schedule": ["d_sos"],
+    # Elo, strength of opposition, win rate, experience and streaks all measure "how good are they", so the fitted model splits
+    # the credit between them in ways that can look backwards one by one (Elo alone pointed at the lower-rated fighter every time).
+    # Merged, the net effect is honest and each merged line shows all of the numbers behind it.
+    "results": ["d_prev_win_rate", "d_logn", "d_streak", "d_last3_win_rate", "d_layoff"],
+    "competition": ["d_elo", "d_elo_x_new", "d_sos"],
     "striking": ["d_slpm", "d_sapm", "d_sig_acc", "d_kd_per15"],
-    "wrestling": ["d_td_per15", "d_td_acc", "d_td_def", "d_ctrl_share", "d_grappling_share"],
-    "submissions": ["d_sub_att_per15", "d_sub_win_rate"],
+    "grappling": ["d_td_per15", "d_td_acc", "d_td_def", "d_ctrl_share", "d_grappling_share", "d_sub_att_per15", "d_sub_win_rate"],
     "finishing": ["d_ko_win_rate"],
     "size": ["d_reach", "d_height"],
 }
-LABELS = {"age": "Age", "form": "Recent form", "record": "UFC record", "rating": "Rating (Elo)", "schedule": "Strength of opposition", "striking": "Striking",
-          "wrestling": "Wrestling and control", "submissions": "Submissions", "finishing": "Finishing power", "size": "Size"}
+LABELS = {"age": "Age", "results": "Results and recent form", "competition": "Level of competition", "striking": "Striking",
+          "grappling": "Grappling", "finishing": "Finishing power", "size": "Size"}
 SUFFIXES = {"jr", "jr.", "sr", "sr.", "ii", "iii", "iv"}
 
 
@@ -355,31 +356,50 @@ def _detail(g: str, r, la: str, lb: str) -> str:
     a, b = (lambda k: r[f"{k}_a"]), (lambda k: r[f"{k}_b"])
     if g == "age":
         return f"{la} {_num(a('age'))}, {lb} {_num(b('age'))}"
-    if g == "form":
-        out = f"streak {la} {_streak(a('streak'))} / {lb} {_streak(b('streak'))}; last 3 fights {_pct(a('last3_win_rate'))} / {_pct(b('last3_win_rate'))}"
+    if g == "results":
+        def rec(who, k):
+            n = int(r[f"n_prev_{k}"])
+            return f"{who} has no UFC fights yet" if n == 0 else f"{who} {n} UFC fights, {_pct(r[f'prev_win_rate_{k}'])} wins"
+        out = (f"{rec(la, 'a')}; {rec(lb, 'b')}. Streak {la} {_streak(a('streak'))} / {lb} {_streak(b('streak'))}; "
+               f"last 3 fights {_pct(a('last3_win_rate'))} / {_pct(b('last3_win_rate'))}")
         for who, d in ((la, a("days_since_last")), (lb, b("days_since_last"))):
             if not _nan(d) and float(d) >= 365:
                 out += f"; {who} was off {int(float(d) // 30)} months"
         return out
-    if g == "record":
-        side = lambda who, k: f"{who}: no UFC fights yet" if int(r[f"n_prev_{k}"]) == 0 else f"{who}: {int(r[f'n_prev_{k}'])} UFC fights, {_pct(r[f'prev_win_rate_{k}'])} wins"
-        return f"{side(la, 'a')}; {side(lb, 'b')}"
-    if g == "rating":
-        return f"Elo rating {la} {_num(r['elo_a'], 0)}, {lb} {_num(r['elo_b'], 0)} (it rises for beating strong opponents)"
-    if g == "schedule":
-        return f"average rating of past opponents: {la} {_num(r['sos_a'], 0)}, {lb} {_num(r['sos_b'], 0)}"
+    if g == "competition":
+        return (f"Elo rating {la} {_num(r['elo_a'], 0)}, {lb} {_num(r['elo_b'], 0)}; "
+                f"average rating of past opponents {la} {_num(r['sos_a'], 0)}, {lb} {_num(r['sos_b'], 0)}")
     if g == "striking":
         return f"{la} lands {_num(a('slpm'), 2)}/min, absorbs {_num(a('sapm'), 2)}; {lb} lands {_num(b('slpm'), 2)}/min, absorbs {_num(b('sapm'), 2)}"
-    if g == "wrestling":
+    if g == "grappling":
         return (f"takedowns per 15 min: {la} {_num(a('td_per15'), 2)}, {lb} {_num(b('td_per15'), 2)}; "
-                f"takedown defense: {la} {_pct(a('td_def'))}, {lb} {_pct(b('td_def'))}")
-    if g == "submissions":
-        return f"submission attempts per 15 min: {la} {_num(a('sub_att_per15'), 2)}, {lb} {_num(b('sub_att_per15'), 2)}"
+                f"takedown defense: {la} {_pct(a('td_def'))}, {lb} {_pct(b('td_def'))}; "
+                f"submission attempts per 15 min: {la} {_num(a('sub_att_per15'), 2)}, {lb} {_num(b('sub_att_per15'), 2)}")
     if g == "finishing":
         return f"KO/TKO wins as a share of fights: {la} {_pct(a('ko_win_rate'))}, {lb} {_pct(b('ko_win_rate'))}"
     if g == "size":
         return f"reach {la} {_inch(a('reach'))}, {lb} {_inch(b('reach'))}; height {la} {_inch(a('height'))}, {lb} {_inch(b('height'))}"
     return ""
+
+
+def _numbers(g: str, r) -> list:
+    """The numbers a reader sees beside a factor, as differences where a positive value means fighter A looks better."""
+    d = lambda k: 0.0 if _nan(r[f"{k}_a"]) or _nan(r[f"{k}_b"]) else float(r[f"{k}_a"]) - float(r[f"{k}_b"])
+    if g == "age":
+        return [-d("age")]
+    if g == "results":
+        return [d("prev_win_rate"), d("n_prev"), d("streak"), d("last3_win_rate")]
+    if g == "competition":
+        return [d("elo"), d("sos")]
+    if g == "striking":
+        return [d("slpm"), -d("sapm"), d("sig_acc")]
+    if g == "grappling":
+        return [d("td_per15"), d("td_def"), d("sub_att_per15")]
+    if g == "finishing":
+        return [d("ko_win_rate")]
+    if g == "size":
+        return [d("reach"), d("height")]
+    return []
 
 
 def contributions(model, mu: dict, P: pd.DataFrame) -> pd.DataFrame:
@@ -395,13 +415,15 @@ def build_reasons(r, c: pd.Series, name_a: str, name_b: str) -> dict:
     factors = []
     for g, feats in GROUPS.items():
         val = float(sum(c.get(f, 0.0) for f in feats))
-        factors.append({"key": g, "label": LABELS[g], "c": round(val, 4), "toward": "A" if val > 0 else "B", "detail": _detail(g, r, la, lb)})
+        shown = [x for x in _numbers(g, r) if abs(x) > 1e-9]
+        net = bool(shown) and all((x > 0) != (val > 0) for x in shown)         # the bar opposes every number shown beside it
+        factors.append({"key": g, "label": LABELS[g], "c": round(val, 4), "toward": "A" if val > 0 else "B", "detail": _detail(g, r, la, lb), "net": net})
     factors.sort(key=lambda f: -abs(f["c"]))
     top = [f for f in factors if abs(f["c"]) >= 0.05][:5]
     other = float(sum(v for k, v in c.items() if k not in mapped))
     rest = float(sum(f["c"] for f in factors if f not in top)) + other
     total = float(c.sum())
-    return {"a": name_a, "b": name_b, "total": round(total, 4), "p_a": round(float(1 / (1 + np.exp(-total))), 4),
+    return {"schema": REASONS_SCHEMA, "a": name_a, "b": name_b, "total": round(total, 4), "p_a": round(float(1 / (1 + np.exp(-total))), 4),
             "factors": top, "rest": round(rest, 4)}
 
 
@@ -413,12 +435,13 @@ REASONS_DDL = """CREATE TABLE IF NOT EXISTS pick_reasons (
     PRIMARY KEY (bout_id, version))"""
 
 
-def save_reasons(engine, version: str, items) -> int:
+def save_reasons(engine, version: str, items, replace: bool = False) -> int:
+    action = "DO UPDATE SET reasons = EXCLUDED.reasons, created_at = now()" if replace else "DO NOTHING"
     with engine.begin() as conn:
         conn.execute(sa.text(REASONS_DDL))
         for bout_id, d in items:
-            conn.execute(sa.text("INSERT INTO pick_reasons (bout_id, version, reasons) VALUES (:b, :v, CAST(:j AS jsonb)) "
-                                 "ON CONFLICT (bout_id, version) DO NOTHING"), {"b": bout_id, "v": version, "j": json.dumps(d)})
+            conn.execute(sa.text(f"INSERT INTO pick_reasons (bout_id, version, reasons) VALUES (:b, :v, CAST(:j AS jsonb)) ON CONFLICT (bout_id, version) {action}"),
+                         {"b": bout_id, "v": version, "j": json.dumps(d)})
     return len(items)
 
 
@@ -524,7 +547,8 @@ def cmd_explain(args) -> int:
         conn.execute(sa.text(REASONS_DDL))
     todo = pd.read_sql(sa.text("""SELECT p.bout_id, p.p_a_wins, p.predicted_at FROM upcoming_picks_v2 p
                                   LEFT JOIN pick_reasons r ON r.bout_id = p.bout_id AND r.version = 'v2'
-                                  WHERE r.bout_id IS NULL AND p.status = 'locked'"""), engine)
+                                  WHERE p.status = 'locked' AND (r.bout_id IS NULL OR COALESCE(r.reasons->>'schema', '1') <> :s)"""),
+                       engine, params={"s": str(REASONS_SCHEMA)})
     if todo.empty:
         log.info("Every locked pick already has its reasons.")
         return 0
@@ -551,7 +575,7 @@ def cmd_explain(args) -> int:
                 log.warning("not explained (the pick cannot be reproduced exactly): %s vs %s", row.name_a, row.name_b)
                 continue
             items.append((bid, build_reasons(row, C.loc[i], row.name_a, row.name_b)))
-        done += save_reasons(engine, "v2", items) if items else 0
+        done += save_reasons(engine, "v2", items, replace=True) if items else 0
     log.info("Stored reasons for %d picks; %d could not be reproduced and were left without reasons", done, skipped)
     return 0
 
