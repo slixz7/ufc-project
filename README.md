@@ -137,7 +137,7 @@ The Power BI file is not included (it contains a database address). `docs/powerb
    python pipeline/auto_update.py all                                # the real thing
    ```
    Exit code 0 = fine, 1 = a step failed, 3 = something needs your attention (listed at the top of the report).
-   To run it daily on GitHub: add the secrets `DATABASE_URL` (owner string), `ODDS_API_KEY`, `KAGGLE_USERNAME`, `KAGGLE_KEY`, run the "Auto update" workflow once by hand, then set the repository variable `AUTO_ENABLED` to `true`.
+   To run it daily on GitHub: add the secrets `DATABASE_URL` (owner string), `ODDS_API_KEY`, `KAGGLE_API_TOKEN`, run the "Auto update" workflow once by hand, then set the repository variable `AUTO_ENABLED` to `true`.
 
 Never commit a connection string. This repo's `.gitignore` excludes `data/`, `.env` and Power BI files.
 

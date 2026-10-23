@@ -232,3 +232,33 @@ def test_a_line_listing_one_of_our_fighters_against_someone_else_is_flagged():
     saved = pd.DataFrame({"bout_id": ["b1"], "event_date": [date(2026, 10, 24)], "a": ["Alexander Volkanovski"], "b": ["Movsar Evloev"]})
     assert au.classify_unmatched("Alex Volkanovski", "Replacement Guy", date(2026, 10, 25), saved) == "card_changed"
     assert au.classify_unmatched("Alex Volkanovski", "Replacement Guy", date(2026, 11, 20), saved) == "ignored"   # a different night
+
+
+def test_kaggle_credentials_new_token_or_old_pair(monkeypatch):
+    for k in ("KAGGLE_API_TOKEN", "KAGGLE_USERNAME", "KAGGLE_KEY"):
+        monkeypatch.delenv(k, raising=False)
+    assert au.kaggle_configured() is False
+    monkeypatch.setenv("KAGGLE_API_TOKEN", "  ")
+    assert au.kaggle_configured() is False                              # a blank secret does not count
+    monkeypatch.setenv("KAGGLE_API_TOKEN", "abc")
+    assert au.kaggle_configured() is True
+    monkeypatch.delenv("KAGGLE_API_TOKEN")
+    monkeypatch.setenv("KAGGLE_USERNAME", "u")
+    assert au.kaggle_configured() is False                              # the old pair needs both halves
+    monkeypatch.setenv("KAGGLE_KEY", "k")
+    assert au.kaggle_configured() is True
+
+
+def test_a_kaggle_sign_in_that_calls_exit_fails_only_its_step(monkeypatch):
+    import types
+    mod = types.ModuleType("kaggle.api.kaggle_api_extended")
+
+    class Api:
+        def authenticate(self):
+            raise SystemExit(1)                                         # what the real package does when it cannot sign in
+    mod.KaggleApi = Api
+    for n in ("kaggle", "kaggle.api"):
+        monkeypatch.setitem(sys.modules, n, types.ModuleType(n))
+    monkeypatch.setitem(sys.modules, "kaggle.api.kaggle_api_extended", mod)
+    with pytest.raises(RuntimeError, match="did not accept the token"):
+        au.kaggle_api()

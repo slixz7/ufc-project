@@ -25,7 +25,7 @@ Safety rules (this script writes to your database on its own, so it is deliberat
   * Anything that needs a human is listed under "Needs your attention" and makes the run end with a non-zero
     exit code, so GitHub emails you.
 
-Environment: DATABASE_URL (owner string), ODDS_API_KEY (optional), KAGGLE_USERNAME + KAGGLE_KEY (optional).
+Environment: DATABASE_URL (owner string), ODDS_API_KEY (optional), KAGGLE_API_TOKEN (optional; the older KAGGLE_USERNAME + KAGGLE_KEY pair also works).
 Sources: Wikipedia (text under CC BY-SA, https://en.wikipedia.org), The Odds API (https://the-odds-api.com).
 """
 from __future__ import annotations
@@ -539,24 +539,46 @@ def step_lock(engine, today: date, rep: Report, dry_run: bool, lock_days: int) -
 # ----------------------------------------------------------------------------------------------
 # step: results
 # ----------------------------------------------------------------------------------------------
+def kaggle_configured() -> bool:
+    """Kaggle's current single token (KAGGLE_API_TOKEN), or the older username + key pair."""
+    return bool(os.getenv("KAGGLE_API_TOKEN", "").strip() or (os.getenv("KAGGLE_USERNAME", "").strip() and os.getenv("KAGGLE_KEY", "").strip()))
+
+
+def kaggle_api():
+    """An authenticated Kaggle client. The Kaggle package calls exit() when it cannot sign in, which would end the whole
+    run, so that is turned into an ordinary error that fails only this step."""
+    from kaggle.api.kaggle_api_extended import KaggleApi            # imported here so the rest works without it
+    api = KaggleApi()
+    try:
+        api.authenticate()
+    except (Exception, SystemExit) as exc:
+        raise RuntimeError(f"Kaggle did not accept the token ({type(exc).__name__}). Check the KAGGLE_API_TOKEN secret.") from None
+    return api
+
+
 def step_results(engine, today: date, rep: Report, dry_run: bool, workdir: Path) -> None:
     with engine.connect() as conn:
         pending = conn.execute(sa.text("""SELECT COUNT(*) FROM upcoming_picks_v2 WHERE graded_at IS NULL AND status = 'locked' AND event_date < :t"""),
                                {"t": today}).scalar()
         newest = conn.execute(sa.text("SELECT MAX(event_date) FROM fights")).scalar()
+    if dry_run and kaggle_configured():          # a harmless look (lists the dataset's files, downloads nothing) proves the token works
+        try:
+            files = getattr(kaggle_api().dataset_list_files(KAGGLE_DATASET), "files", None)
+            rep.add("Kaggle access", f"the token works; {KAGGLE_DATASET} lists {len(files) if files is not None else 'some'} file(s)")
+        except Exception as exc:
+            rep.add("Kaggle access", f"FAILED: {str(exc)[:200]}")
+            rep.need(f"Kaggle: {str(exc)[:160]}")
     if not pending:
         rep.add("Results", f"No locked picks are waiting for results (dataset runs through {newest}).")
         return
-    if not (os.getenv("KAGGLE_USERNAME") and os.getenv("KAGGLE_KEY")):
-        rep.add("Results", f"{pending} locked picks are waiting for results, but KAGGLE_USERNAME / KAGGLE_KEY are not set.")
-        rep.need(f"Results: {pending} picks are waiting for results. Add the Kaggle secrets, or download the dataset yourself and run update_from_csv.py.")
+    if not kaggle_configured():
+        rep.add("Results", f"{pending} locked picks are waiting for results, but no Kaggle token is set.")
+        rep.need(f"Results: {pending} picks are waiting for results. Add the KAGGLE_API_TOKEN secret, or download the dataset yourself and run update_from_csv.py.")
         return
     if dry_run:
         rep.add("Results", f"{pending} locked picks are waiting for results. Would download {KAGGLE_DATASET}, add new fights, grade, and score them.")
         return
-    from kaggle.api.kaggle_api_extended import KaggleApi            # imported here so the rest works without it
-    api = KaggleApi()
-    api.authenticate()
+    api = kaggle_api()
     dest = workdir / "kaggle"
     dest.mkdir(parents=True, exist_ok=True)
     api.dataset_download_files(KAGGLE_DATASET, path=str(dest), unzip=True, quiet=True)
@@ -620,7 +642,7 @@ def run(args) -> int:
         try:
             steps[name]()
             log.info("step %-13s ok (%.1fs)", name, time.time() - t0)
-        except Exception as exc:                              # one step failing must not stop the others
+        except (Exception, SystemExit) as exc:               # one step failing must not stop the others (even one that calls exit())
             log.exception("step %s failed", name)
             rep.failed.append(name)
             rep.add(f"FAILED: {name}", f"{type(exc).__name__}: {str(exc)[:300]}")
