@@ -16,6 +16,7 @@ Commands (use the OWNER database string, these write to the database)
     python pipeline/model_v2.py predict               # picks for loaded upcoming cards (locked, never changed)
     python pipeline/model_v2.py grade                 # score locked picks once results are in the dataset
     python pipeline/model_v2.py explain               # store the plain-language "Why this pick?" reasons for locked picks that lack them
+    python pipeline/model_v2.py explain-past          # the same for every past fight's backtest pick (one-off backfill; the backtest keeps it current)
 
 Every pick carries a tier: full (both fighters have 3+ UFC fights), limited (the less experienced has 1-2),
 debut (a fighter has none). Fights before the model had enough history to learn from (the first ~300) use a
@@ -39,6 +40,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import sqlalchemy as sa
+from sqlalchemy.dialects.postgresql import JSONB
 from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
@@ -435,6 +437,26 @@ REASONS_DDL = """CREATE TABLE IF NOT EXISTS pick_reasons (
     PRIMARY KEY (bout_id, version))"""
 
 
+FIGHT_REASONS_DDL = """CREATE TABLE IF NOT EXISTS fight_reasons (
+    fight_url  TEXT NOT NULL,
+    version    TEXT NOT NULL,                 -- 'v2' (model-only) or 'v3' (market-informed)
+    reasons    JSONB NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    PRIMARY KEY (fight_url, version))"""
+
+
+def insert_fight_reasons(engine, version: str, rows) -> int:
+    """rows: [(fight_url, reasons dict)]. Replaces any reasons already stored for those fights."""
+    if not rows:
+        return 0
+    df = pd.DataFrame({"fight_url": [r[0] for r in rows], "version": version, "reasons": [r[1] for r in rows]})
+    with engine.begin() as conn:
+        conn.execute(sa.text(FIGHT_REASONS_DDL))
+        conn.execute(sa.text("DELETE FROM fight_reasons WHERE version = :v AND fight_url = ANY(:u)"), {"v": version, "u": list(df.fight_url)})
+        df.to_sql("fight_reasons", conn, if_exists="append", index=False, method="multi", chunksize=300, dtype={"reasons": JSONB})
+    return len(df)
+
+
 def save_reasons(engine, version: str, items, replace: bool = False) -> int:
     action = "DO UPDATE SET reasons = EXCLUDED.reasons, created_at = now()" if replace else "DO NOTHING"
     with engine.begin() as conn:
@@ -466,7 +488,7 @@ def cmd_backtest(args) -> int:
     P = make_pairs(history)
     todo_dates = sorted(P[~P.fight_url.isin(done)].event_date.unique())
     log.info("%d fights in the database, %d without a v2 pick yet (%d event nights)", len(P), int((~P.fight_url.isin(done)).sum()), len(todo_dates))
-    out = []
+    out, reasons_rows = [], []
     for D in todo_dates:
         te = P[(P.event_date == D) & ~P.fight_url.isin(done)]
         tr = P[P.event_date < D]
@@ -474,6 +496,11 @@ def cmd_backtest(args) -> int:
             model, mu = fit(tr)
             X = design(te, mu)
             p = model.predict_proba(X)[:, 1]
+            try:                                   # the reasons are a nicety: they must never be able to break the backtest
+                C = contributions(model, mu, te)
+                reasons_rows += [(row.fight_url, build_reasons(row, C.loc[i], row.name_a, row.name_b)) for i, row in te.iterrows()]
+            except Exception as exc:
+                log.warning("could not build the reasons for %s (%s)", D, exc)
             out.append(picks_frame(te, p, "model", len(tr)).join(te[["fight_url", "event_date", "event_name", "weight_class", "title_fight", "a_wins"]]))
         else:
             out.append(picks_frame(te, early_rule(te).values, "early_rule", len(tr)).join(te[["fight_url", "event_date", "event_name", "weight_class", "title_fight", "a_wins"]]))
@@ -488,6 +515,10 @@ def cmd_backtest(args) -> int:
             "tier", "method", "p_a_wins", "predicted_winner", "confidence", "actual_winner", "correct", "trained_on_fights"]
     with engine.begin() as conn:
         R[cols].to_sql("fight_picks_v2", conn, if_exists="append", index=False, method="multi", chunksize=500)
+    try:
+        log.info("Stored reasons for %d past fights", insert_fight_reasons(engine, "v2", reasons_rows))
+    except Exception as exc:
+        log.warning("could not store the reasons (%s); run: python pipeline/model_v2.py explain-past", exc)
     m = R[R.method == "model"]
     log.info("Wrote %d picks (%d from the model, %d from the early-era rule). Model accuracy on those: %.1f%%",
              len(R), len(m), len(R) - len(m), 100 * m.correct.mean() if len(m) else float("nan"))
@@ -580,6 +611,45 @@ def cmd_explain(args) -> int:
     return 0
 
 
+def cmd_explain_past(args) -> int:
+    """Store 'Why this pick?' reasons for past fights whose backtest pick has none (or has an older style of reasons). Each
+    pick is re-created exactly as it was made (the model trained only on fights before that event) and its reasons are saved
+    only if they reproduce the stored probability."""
+    engine = make_engine()
+    with engine.begin() as conn:
+        conn.execute(sa.text(FIGHT_REASONS_DDL))
+    todo = pd.read_sql(sa.text("""SELECT p.fight_url, p.event_date, p.p_a_wins FROM fight_picks_v2 p
+                                  LEFT JOIN fight_reasons r ON r.fight_url = p.fight_url AND r.version = 'v2'
+                                  WHERE p.method = 'model' AND (r.fight_url IS NULL OR COALESCE(r.reasons->>'schema', '1') <> :s)"""),
+                       engine, params={"s": str(REASONS_SCHEMA)})
+    if todo.empty:
+        log.info("Every past model pick already has its reasons.")
+        return 0
+    log.info("%d past fights need reasons (%d event nights); rebuilding each night's model ...", len(todo), todo.event_date.nunique())
+    P = make_pairs(load_history(engine))
+    stored = dict(zip(todo.fight_url, todo.p_a_wins))
+    rows, skipped, done_dates = [], 0, 0
+    for D in sorted(pd.to_datetime(todo.event_date).unique()):
+        te = P[(P.event_date == D) & P.fight_url.isin(stored)]
+        tr = P[P.event_date < D]
+        if te.empty or len(tr) < MIN_TRAIN:
+            continue
+        model, mu = fit(tr)
+        p = pd.Series(model.predict_proba(design(te, mu))[:, 1], index=te.index)
+        C = contributions(model, mu, te)
+        for i, row in te.iterrows():
+            if abs(float(p[i]) - float(stored[row.fight_url])) > 0.002:
+                skipped += 1
+                continue
+            rows.append((row.fight_url, build_reasons(row, C.loc[i], row.name_a, row.name_b)))
+        done_dates += 1
+        if done_dates % 100 == 0:
+            log.info("   ... %d event nights done", done_dates)
+    n = insert_fight_reasons(engine, "v2", rows)
+    log.info("Stored reasons for %d past fights; %d could not be reproduced and were left without reasons", n, skipped)
+    return 0
+
+
 def cmd_grade(args) -> int:
     engine = make_engine()
     with engine.begin() as conn:
@@ -641,9 +711,11 @@ def main(argv=None) -> int:
     p.add_argument("--today", help="(testing only) pretend today is YYYY-MM-DD")
     sub.add_parser("grade")
     sub.add_parser("explain")
+    sub.add_parser("explain-past")
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    return {"setup": cmd_setup, "backtest": cmd_backtest, "predict": cmd_predict, "grade": cmd_grade, "explain": cmd_explain}[args.command](args)
+    return {"setup": cmd_setup, "backtest": cmd_backtest, "predict": cmd_predict, "grade": cmd_grade, "explain": cmd_explain,
+            "explain-past": cmd_explain_past}[args.command](args)
 
 
 if __name__ == "__main__":

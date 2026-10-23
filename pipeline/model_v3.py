@@ -20,6 +20,7 @@ Commands (use the OWNER database string, these write to the database)
     python pipeline/model_v3.py predict [--within-days 2]      # lock v3 picks for bouts that have a line (before the event)
     python pipeline/model_v3.py grade                          # copy results over once `model_v2.py grade` has run
     python pipeline/model_v3.py explain                        # store the "Why this pick?" reasons for locked picks that lack them
+    python pipeline/model_v3.py explain-past                   # the same for every past fight's market-informed backtest pick
 
 Two-stage picks: the v2 pick is locked as soon as a card is announced (model_v2.py predict). Once a line is loaded, the v3 pick
 is locked too. Neither is ever changed. The app shows v3 when it exists and v2 otherwise.
@@ -168,9 +169,11 @@ def cmd_backtest(args) -> int:
         tr = T[T.event_date < D]
         if len(tr) < MIN_STACK_TRAIN:
             continue
-        p = stack_predict(fit_stacker(tr), te.p_v2_a.values, te.market_a.values)
+        mdl = fit_stacker(tr)
+        p = stack_predict(mdl, te.p_v2_a.values, te.market_a.values)
         r = te.copy()
         r["p_a_wins"], r["trained_on_fights"] = p, len(tr)
+        r["w_model"], r["w_market"] = stack_weights(mdl)
         out.append(r)
     if not out:
         log.info("Nothing to score.")
@@ -190,6 +193,11 @@ def cmd_backtest(args) -> int:
             "p_a_wins", "predicted_winner", "confidence", "actual_winner", "correct", "v2_correct", "market_correct", "trained_on_fights"]
     with engine.begin() as conn:
         R[cols].to_sql("fight_picks_v3", conn, if_exists="append", index=False, method="multi", chunksize=500)
+    try:                                   # the reasons are a nicety: they must never be able to break the backtest
+        v2.insert_fight_reasons(engine, "v3", [(r.fight_url, v3_reasons(r.fighter_a, r.fighter_b, r.p_v2_a, r.market_prob_a, r.p_a_wins, r.w_model, r.w_market))
+                                               for r in R.itertuples()])
+    except Exception as exc:
+        log.warning("could not store the reasons (%s); run: python pipeline/model_v3.py explain-past", exc)
     log.info("Wrote %d v3 picks. Accuracy on them: v3 %.1f%%  |  v2 alone %.1f%%  |  the opening line alone %.1f%%",
              len(R), 100 * R.correct.mean(), 100 * R.v2_correct.mean(), 100 * R.market_correct.mean())
     for tier, g in R.groupby("tier"):
@@ -361,6 +369,33 @@ def cmd_explain(args) -> int:
     return 0
 
 
+def cmd_explain_past(args) -> int:
+    """Store the 'two opinions' reasons for past market-informed picks that have none, only when they reproduce the pick."""
+    engine = v2.make_engine()
+    with engine.begin() as conn:
+        conn.execute(sa.text(v2.FIGHT_REASONS_DDL))
+    todo = pd.read_sql(sa.text("""SELECT p.fight_url, p.event_date, p.fighter_a, p.fighter_b, p.p_v2_a, p.market_prob_a, p.p_a_wins FROM fight_picks_v3 p
+                                  LEFT JOIN fight_reasons r ON r.fight_url = p.fight_url AND r.version = 'v3'
+                                  WHERE r.fight_url IS NULL"""), engine)
+    if todo.empty:
+        log.info("Every past market-informed pick already has its reasons.")
+        return 0
+    T = training_table(engine)
+    rows, skipped = [], 0
+    for D, grp in todo.groupby("event_date"):
+        mdl = fit_stacker(T[T.event_date < pd.Timestamp(D)])
+        wm, wk = stack_weights(mdl)
+        for r in grp.itertuples():
+            z = wm * float(logit(r.p_v2_a)) + wk * float(logit(r.market_prob_a))
+            if abs(1 / (1 + np.exp(-z)) - float(r.p_a_wins)) > 0.002:
+                skipped += 1
+                continue
+            rows.append((r.fight_url, v3_reasons(r.fighter_a, r.fighter_b, r.p_v2_a, r.market_prob_a, r.p_a_wins, wm, wk)))
+    n = v2.insert_fight_reasons(engine, "v3", rows)
+    log.info("Stored reasons for %d past market-informed picks; %d could not be reproduced", n, skipped)
+    return 0
+
+
 def cmd_grade(args) -> int:
     engine = v2.make_engine()
     with engine.begin() as conn:
@@ -395,10 +430,12 @@ def main(argv=None) -> int:
     p.add_argument("--dry-run", action="store_true", help="show the picks that would be locked; write nothing")
     sub.add_parser("grade")
     sub.add_parser("explain")
+    sub.add_parser("explain-past")
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     return {"setup": cmd_setup, "load-odds": cmd_load_odds, "backtest": cmd_backtest, "odds": cmd_odds, "predict": cmd_predict,
-            "grade": cmd_grade, "explain": cmd_explain}[args.command](args)
+            "grade": cmd_grade, "explain": cmd_explain,
+            "explain-past": cmd_explain_past}[args.command](args)
 
 
 if __name__ == "__main__":

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import html
 import json
+from types import SimpleNamespace
 import os
 from datetime import date
 
@@ -163,6 +164,7 @@ label[data-testid="stRadioOption"][data-selected="true"] p {color:#171717; font-
 .ufc .foot {margin-top:42px; border-top:1px solid var(--ink); padding-top:10px; color:var(--muted); font-style:italic; font-size:.88rem;}
 
 /* why this pick */
+.ufc .whyrow {padding:0 0 12px 0;} .ufc .whyrow details {margin-top:0;}
 .ufc .why {margin-top:6px;}
 .ufc .two {display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; margin:10px 0 6px;}
 .ufc .two > div {border-top:2px solid var(--ink); padding-top:6px; font-size:1.08rem;}
@@ -379,6 +381,13 @@ REASONS: dict = {}          # bout_id -> {"v2": reasons, "v3": reasons}, filled 
 def has_reasons() -> bool:
     try:
         return bool(q("SELECT to_regclass('public.pick_reasons') IS NOT NULL AS ok").ok.iloc[0])
+    except Exception:
+        return False
+
+
+def has_fight_reasons() -> bool:
+    try:
+        return bool(q("SELECT to_regclass('public.fight_reasons') IS NOT NULL AS ok").ok.iloc[0])
     except Exception:
         return False
 
@@ -643,7 +652,7 @@ def page_past():
     p3_src = "fight_picks_v3" if has_v3() else NO_V3_PAST
     fights = q(f"""
         SELECT f.weight_class, f.title_fight, w.fighter_name AS winner, l.fighter_name AS loser, f.result,
-               f.finish_round, f.finish_time,
+               f.finish_round, f.finish_time, f.fight_url AS fight_url, p.fighter_a AS pa, p.fighter_b AS pb,
                COALESCE(p3.predicted_winner, p.predicted_winner) AS predicted_winner, COALESCE(p3.confidence, p.confidence) AS confidence,
                CASE WHEN p3.fight_url IS NOT NULL THEN p3.correct ELSE p.correct END AS correct, p.tier, p.method,
                CASE WHEN p3.fight_url IS NOT NULL THEN 'market' END AS src
@@ -655,6 +664,11 @@ def page_past():
         WHERE f.event_name = :e AND f.event_date = :d
         ORDER BY f.title_fight DESC, f.fight_url""", {"e": row.event_name, "d": row.event_date.date()})
     first_model = q("SELECT MIN(event_date) AS d FROM fight_picks_v2 WHERE method = 'model'").iloc[0, 0]
+    REASONS.clear()
+    if has_fight_reasons():
+        rr = q("SELECT fight_url, version, reasons FROM fight_reasons WHERE fight_url = ANY(:ids)", {"ids": [str(x) for x in fights.fight_url]})
+        for x in rr.itertuples():
+            REASONS.setdefault(x.fight_url, {})[x.version] = x.reasons if isinstance(x.reasons, dict) else json.loads(x.reasons)
     scored = fights[fights.correct.notna()]
     model_fact = f'<span>Model: <b>{int(scored.correct.sum())} of {len(scored)}</b> right</span>' if len(scored) else ""
     body = []
@@ -673,9 +687,14 @@ def page_past():
                 bits.append("market-informed")
             tag = f' <span class="muted small">· {esc(", ".join(bits))}</span>' if bits else ""
             model = mark(ok, f"{str(r.predicted_winner)} ({float(r.confidence):.0%})") + tag
+        why = ""
+        if not isnull(r.correct) and r.fight_url in REASONS:
+            why = why_html(SimpleNamespace(bout_id=r.fight_url, predicted_winner=r.predicted_winner, fighter_a=r.pa, fighter_b=r.pb,
+                                           pick_src="market" if getattr(r, "src", None) == "market" else "model"))
         body.append(f'<div class="res"><div class="div">{esc(f_text(r.weight_class))}{title}</div>'
                     f'<div><span class="w">{esc(r.winner)}</span> <span class="lo">def. {esc(r.loser)}</span></div>'
-                    f'<div class="how">{method_text(r.result)} &nbsp;R{f_int(r.finish_round)} {esc(f_text(r.finish_time))}</div><div>{model}</div></div>')
+                    f'<div class="how">{method_text(r.result)} &nbsp;R{f_int(r.finish_round)} {esc(f_text(r.finish_time))}</div><div>{model}</div></div>'
+                    + (f'<div class="whyrow">{why}</div>' if why else ""))
     early = ""
     if not isnull(first_model):
         early = (f" Fights before {pd.Timestamp(first_model).strftime('%B %Y')} use a simple rule (higher Elo rating, then the younger fighter) "
@@ -683,7 +702,8 @@ def page_past():
     module_html(f'<div class="hero"><div class="kicker mono">{esc(row.event_date.strftime("%A, %B %d, %Y"))}</div><h1>{esc(row.event_name)}</h1>'
                 f'<div class="facts"><span><b>{len(fights)}</b> fights</span>{model_fact}</div></div>'
                 f'<div style="margin-top:8px">{"".join(body)}</div>'
-                f'<div class="note">Every pick here is an after-the-fact test: the model is retrained using only fights from before the event. '
+                f'<div class="note">Every pick here is an after-the-fact test: the model is retrained using only fights from before the event, and the '
+                f'"Why this pick?" panels show what it saw at that time. '
                 f'Fights with a debut or newcomer carry less information, so their picks are less reliable.{esc(early)}'
                 f'{" From 2016 on, picks also use the fight’s opening betting line where one exists (market-informed)." if has_v3() else ""}</div>')
 

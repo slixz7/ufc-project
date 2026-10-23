@@ -359,3 +359,12 @@ def test_snapshot_prices_are_flipped_into_card_order():
 
 def test_snapshots_are_rate_limited_so_a_repeated_run_adds_nothing():
     assert 1 <= au.SNAPSHOT_GAP_HOURS <= 12
+
+
+def test_reasons_can_be_stored_as_json():
+    """The past-fight backfill writes ~14,000 of these into a JSONB column; a stray numpy value would break it."""
+    import json
+    c = pd.Series({f: 0.1 for fs in model_v2.GROUPS.values() for f in fs}).astype("float32")
+    d = model_v2.build_reasons(_row(), c, "A One", "B Two")
+    assert json.loads(json.dumps(d))["schema"] == model_v2.REASONS_SCHEMA
+    json.dumps(model_v3.v3_reasons("A One", "B Two", np.float32(0.59), np.float64(0.81), np.float32(0.83), 0.41, 0.99))
