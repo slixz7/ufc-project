@@ -337,3 +337,25 @@ def test_the_blend_reasons_are_exact():
 def test_last_names_handle_suffixes():
     assert model_v2.last_name("Alexander Volkanovski") == "Volkanovski"
     assert model_v2.last_name("Raul Rosas Jr.") == "Rosas Jr."
+
+
+# ---------------------------------------------------------------------------------------------- odds history (daily snapshots)
+def test_every_bookmakers_prices_are_captured_not_just_the_median():
+    books = au.event_books(EVENT)
+    assert [b["book"] for b in books] == ["a", "b", "c"]                          # the spreads-only book is ignored
+    assert books[0]["home"] == -150 and books[0]["away"] == 130
+    assert abs(books[0]["p_home"] - model_v3.devig(-150, 130)) < 1e-9
+    assert books[1]["home"] == -145 and books[1]["away"] == 125                   # the API listed this book's outcomes in the other order
+
+
+def test_snapshot_prices_are_flipped_into_card_order():
+    books = au.event_books(EVENT)
+    same = au.orient_books(books, home_is_a=True)
+    flipped = au.orient_books(books, home_is_a=False)
+    assert same[0]["a"] == -150 and same[0]["b"] == 130
+    assert flipped[0]["a"] == 130 and flipped[0]["b"] == -150                     # fighter A is the API's away fighter
+    assert abs(same[0]["p_a"] + flipped[0]["p_a"] - 1.0) < 1e-3
+
+
+def test_snapshots_are_rate_limited_so_a_repeated_run_adds_nothing():
+    assert 1 <= au.SNAPSHOT_GAP_HOURS <= 12

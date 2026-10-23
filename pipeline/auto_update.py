@@ -9,6 +9,7 @@ One command runs everything in the right order (each step is separate, so one fa
     lock          lock market-informed (v3) picks once an event is inside the lock window (default: 2 days before)
     results       download the latest results, add them, grade locked picks, score new fights
     refresh-odds  (Mondays) refresh the historical odds dataset and the v3 backtest
+    odds-history  (a report, not part of `all`) what the daily line snapshots have collected so far
 
     python pipeline/auto_update.py all --dry-run        # look, change nothing (do this first)
     python pipeline/auto_update.py all                  # the real thing (this is what the scheduled job runs)
@@ -32,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import difflib
+import json
 import logging
 import os
 import re
@@ -64,6 +66,7 @@ HORIZON_DAYS = 75          # how far ahead to look for announced events
 LOCK_DAYS = 2              # lock market-informed picks when the event is this close
 URGENT_DAYS = 10           # a held name inside this many days makes the run fail loudly
 MAX_SHRINK = 2             # a card that loses more bouts than this since we last saved it is not applied
+SNAPSHOT_GAP_HOURS = 3     # a bout gets at most one line snapshot per this many hours (so a repeated run adds nothing)
 KAGGLE_DATASET = "scarekrow/ufc-data"
 ODDS_DATASET_REPO = "https://github.com/nlbair/ufc-data.git"
 
@@ -456,58 +459,145 @@ def classify_unmatched(home: str, away: str, commence: date, bouts: pd.DataFrame
     return "ignored"
 
 
+SNAPSHOT_DDL = [
+    """CREATE TABLE IF NOT EXISTS odds_snapshots (
+        id             BIGSERIAL PRIMARY KEY,
+        snapshot_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+        bout_id        TEXT NOT NULL,
+        event_date     DATE,
+        fighter_a      TEXT,
+        fighter_b      TEXT,
+        commence_time  TIMESTAMPTZ,
+        market_prob_a  DOUBLE PRECISION,     -- median across bookmakers, margin removed
+        prob_min_a     DOUBLE PRECISION,
+        prob_max_a     DOUBLE PRECISION,
+        n_books        INTEGER,
+        books          JSONB,                -- every bookmaker's prices, in card order: [{book, a, b, p_a}]
+        source         TEXT)""",
+    "CREATE INDEX IF NOT EXISTS odds_snapshots_bout_idx ON odds_snapshots (bout_id, snapshot_at)",
+    """CREATE OR REPLACE VIEW odds_bout_summary AS
+       WITH r AS (SELECT s.*, ROW_NUMBER() OVER (PARTITION BY bout_id ORDER BY snapshot_at) AS rn_first,
+                              ROW_NUMBER() OVER (PARTITION BY bout_id ORDER BY snapshot_at DESC) AS rn_last
+                  FROM odds_snapshots s)
+       SELECT bout_id, MAX(event_date) AS event_date, MAX(fighter_a) AS fighter_a, MAX(fighter_b) AS fighter_b, COUNT(*) AS snapshots,
+              MIN(snapshot_at) AS first_seen, MAX(snapshot_at) AS last_seen,
+              MAX(market_prob_a) FILTER (WHERE rn_first = 1) AS first_prob_a,
+              MAX(market_prob_a) FILTER (WHERE rn_last = 1)  AS last_prob_a
+       FROM r GROUP BY bout_id""",
+    # the raw prices are kept private: the website's read-only user cannot see them (the app never shows odds)
+    """DO $$ BEGIN
+         IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'app_reader') THEN
+           EXECUTE 'REVOKE ALL ON odds_snapshots FROM app_reader';
+           EXECUTE 'REVOKE ALL ON odds_bout_summary FROM app_reader';
+         END IF;
+       END $$""",
+]
+
+
+def ensure_snapshot_tables(engine) -> None:
+    with engine.begin() as conn:
+        for stmt in SNAPSHOT_DDL:
+            conn.exec_driver_sql(stmt)
+
+
+def event_books(ev: dict) -> list[dict]:
+    """Every bookmaker's head-to-head prices for one listed fight: [{book, home, away, p_home}] (American prices)."""
+    home, away = ev.get("home_team"), ev.get("away_team")
+    out = []
+    for bk in ev.get("bookmakers", []) or []:
+        for m in bk.get("markets", []) or []:
+            if m.get("key") != "h2h":
+                continue
+            prices = {o.get("name"): o.get("price") for o in m.get("outcomes", []) or [] if o.get("price") is not None}
+            if home in prices and away in prices:
+                try:
+                    out.append({"book": bk.get("key"), "home": float(prices[home]), "away": float(prices[away]),
+                                "p_home": model_v3.devig(float(prices[home]), float(prices[away]))})
+                except (ValueError, ZeroDivisionError):
+                    continue
+    return out
+
+
+def orient_books(books: list[dict], home_is_a: bool) -> list[dict]:
+    """The same prices in card order (a = the card's fighter A), with each book's margin-free P(A)."""
+    return [{"book": b["book"], "a": b["home"] if home_is_a else b["away"], "b": b["away"] if home_is_a else b["home"],
+             "p_a": round(b["p_home"] if home_is_a else 1 - b["p_home"], 4)} for b in books]
+
+
 def step_odds(engine, today: date, rep: Report, dry_run: bool, save_raw: Path | None, session=None, show: bool = False) -> None:
     key = os.getenv("ODDS_API_KEY", "").strip()
     if not key:
         rep.add("Betting lines (The Odds API)", "No ODDS_API_KEY set, skipped. Bouts stay model-only until you add one.")
         return
     events, remaining = fetch_odds(key, session, save_raw)
+    now = datetime.now(timezone.utc)
     bouts = pd.read_sql(sa.text("""SELECT u.bout_id, u.event_date, u.fighter_a_name AS a, u.fighter_b_name AS b,
                                            (SELECT COUNT(*) FROM upcoming_picks_v3 p WHERE p.bout_id = u.bout_id) AS locked
-                                    FROM upcoming_fights u WHERE u.status = 'scheduled' AND u.event_date > :t"""), engine, params={"t": today})
-    open_bouts = bouts[bouts.locked == 0]
-    matched, ignored, changed, lopsided, skipped_locked, rows, shown = 0, [], [], [], 0, [], []
+                                    FROM upcoming_fights u WHERE u.status = 'scheduled' AND u.event_date >= :t"""), engine, params={"t": today})
+    matched, ignored, changed, lopsided, skipped_locked, rows, snaps, shown = 0, [], [], [], 0, [], [], []
     for ev in events:
         cons = event_consensus(ev)
         if cons is None:
             continue
         home, away, p_home, n_books = cons
         try:
-            commence = datetime.fromisoformat(str(ev["commence_time"]).replace("Z", "+00:00")).date()
+            commence_dt = datetime.fromisoformat(str(ev["commence_time"]).replace("Z", "+00:00"))
         except (KeyError, ValueError):
             continue
-        if commence <= today:
-            continue                                  # already started
-        hit = match_line_to_bout(home, away, commence, open_bouts)
+        if commence_dt <= now:
+            continue                                  # already started: a line is no longer "before the fight"
+        commence = commence_dt.date()
+        hit = match_line_to_bout(home, away, commence, bouts)
         if hit is None:
-            if match_line_to_bout(home, away, commence, bouts) is not None:
-                skipped_locked += 1
-            elif classify_unmatched(home, away, commence, bouts) == "card_changed":
+            if classify_unmatched(home, away, commence, bouts) == "card_changed":
                 changed.append((home, away, commence))
             else:
                 ignored.append((home, away, commence))
             continue
         bout, home_is_a = hit
         p_a = p_home if home_is_a else 1 - p_home
+        books = orient_books(event_books(ev), home_is_a)
+        snaps.append({"b": bout.bout_id, "d": bout.event_date, "fa": bout.a, "fb": bout.b, "ct": commence_dt, "p": p_a,
+                      "pmin": min(x["p_a"] for x in books), "pmax": max(x["p_a"] for x in books), "n": len(books), "books": json.dumps(books),
+                      "src": f"the-odds-api ({now:%Y-%m-%d %H:%M} UTC)"})
+        if bout.locked:
+            skipped_locked += 1                       # its pick is locked; the line is still recorded in the history above
+            continue
         if not 0.02 <= p_a <= 0.98:
             lopsided.append((bout.a, bout.b, p_a))
             continue
+        if bout.event_date <= today:
+            continue                                  # event day: nothing left to lock, but the snapshot above is kept
         matched += 1
         shown.append(f"   {bout.event_date}  {bout.a} vs {bout.b}: {p_a:.0%} for {bout.a} (median of {n_books} book(s))")
-        rows.append({"bout_id": bout.bout_id, "p": p_a, "src": f"the-odds-api median of {n_books} book(s), {datetime.now(timezone.utc):%Y-%m-%d %H:%M} UTC"})
-    if rows and not dry_run:
+        rows.append({"bout_id": bout.bout_id, "p": p_a, "src": f"the-odds-api median of {n_books} book(s), {now:%Y-%m-%d %H:%M} UTC"})
+    stored = 0
+    if not dry_run:
+        ensure_snapshot_tables(engine)
         with engine.begin() as conn:
             for r in rows:
                 conn.execute(sa.text("""INSERT INTO upcoming_odds (bout_id, odds_a, odds_b, market_prob_a, source) VALUES (:b, NULL, NULL, :p, :s)
                                         ON CONFLICT (bout_id) DO UPDATE SET market_prob_a = EXCLUDED.market_prob_a, source = EXCLUDED.source,
                                         entered_at = now()"""), {"b": r["bout_id"], "p": r["p"], "s": r["src"]})
+            for sn in snaps:
+                res = conn.execute(sa.text("""INSERT INTO odds_snapshots (bout_id, event_date, fighter_a, fighter_b, commence_time, market_prob_a, prob_min_a,
+                                                                           prob_max_a, n_books, books, source)
+                                              SELECT :b, :d, :fa, :fb, :ct, :p, :pmin, :pmax, :n, CAST(:books AS jsonb), :src
+                                              WHERE NOT EXISTS (SELECT 1 FROM odds_snapshots s WHERE s.bout_id = :b
+                                                                AND s.snapshot_at > now() - make_interval(hours => :gap))"""), {**sn, "gap": SNAPSHOT_GAP_HOURS})
+                stored += res.rowcount
     lines = [f"{len(events)} fights listed by the API; {matched} matched to announced UFC bouts" + (" (dry run, not saved)" if dry_run else " and saved"),
              f"{skipped_locked} already have a locked market-informed pick (their lines are final)",
              f"API credits left this month: {remaining if remaining is not None else 'unknown'}"]
+    if dry_run:
+        lines.append(f"{len(snaps)} line snapshots would be added to the odds history")
+    else:
+        total = pd.read_sql(sa.text("SELECT COUNT(*) AS n, COUNT(DISTINCT bout_id) AS b, MIN(snapshot_at)::date AS d FROM odds_snapshots"), engine).iloc[0]
+        lines.append(f"{stored} new line snapshots stored; the history now holds {int(total.n)} snapshots of {int(total.b)} bouts since {total.d}")
     if show:
         lines += shown
     for a, b, p in lopsided:
-        lines.append(f"not used: the line for {a} vs {b} is too lopsided ({p:.0%})")
+        lines.append(f"not used for a pick: the line for {a} vs {b} is too lopsided ({p:.0%}); it is still recorded in the history")
     if ignored:
         lines.append(f"{len(ignored)} other lines ignored (other promotions, rumoured or not-yet-announced matchups)")
         if show:
@@ -518,6 +608,33 @@ def step_odds(engine, today: date, rep: Report, dry_run: bool, save_raw: Path | 
             rep.need(f"Odds: a line lists {h} vs {a} on {c}, but one of them is saved against a different opponent. "
                      "The card may need a replacement opponent (re-run the cards step).")
     rep.add("Betting lines (The Odds API)", *lines)
+
+
+def odds_history(engine) -> int:
+    """A plain report on the odds history collected so far, and (once results are in) how the last line did against our picks."""
+    ok = pd.read_sql(sa.text("SELECT to_regclass('public.odds_snapshots') IS NOT NULL AS ok"), engine).ok.iloc[0]
+    if not ok:
+        print("No odds history yet. It starts with the first real run of the odds step.")
+        return 0
+    t = pd.read_sql(sa.text("SELECT COUNT(*) AS n, COUNT(DISTINCT bout_id) AS b, COUNT(DISTINCT snapshot_at::date) AS days, MIN(snapshot_at)::date AS d0, "
+                            "MAX(snapshot_at)::date AS d1 FROM odds_snapshots"), engine).iloc[0]
+    print(f"Odds history: {int(t.n)} snapshots of {int(t.b)} bouts over {int(t.days)} day(s), {t.d0} to {t.d1}.")
+    s = pd.read_sql(sa.text("SELECT * FROM odds_bout_summary"), engine)
+    multi = s[s.snapshots > 1]
+    if len(multi):
+        move = (multi.last_prob_a - multi.first_prob_a).abs() * 100
+        print(f"Line movement between the first and last snapshot of a bout: average {move.mean():.1f} points, biggest {move.max():.1f} "
+              f"({len(multi)} bouts with 2+ snapshots).")
+    g = pd.read_sql(sa.text("""SELECT s.fighter_a, s.fighter_b, s.last_prob_a, v2.actual_winner, v2.correct AS v2c, v3.correct AS v3c
+                               FROM odds_bout_summary s JOIN upcoming_picks_v2 v2 USING (bout_id) LEFT JOIN upcoming_picks_v3 v3 USING (bout_id)
+                               WHERE v2.actual_winner IS NOT NULL"""), engine)
+    if g.empty:
+        print("No bout with a recorded line has a result yet. After an event is graded, this report compares the last line with our picks.")
+        return 0
+    fav_right = ((g.last_prob_a >= 0.5) == (g.actual_winner == g.fighter_a))
+    print(f"Graded bouts with a recorded line: {len(g)}. The last line's favourite won {int(fav_right.sum())} ({fav_right.mean():.0%}); "
+          f"our model-only picks {int(g.v2c.sum())} ({g.v2c.mean():.0%})" + (f"; market-informed picks {int(g.v3c.dropna().sum())} of {int(g.v3c.notna().sum())}." if g.v3c.notna().any() else "."))
+    return 0
 
 
 # ----------------------------------------------------------------------------------------------
@@ -663,7 +780,7 @@ def run(args) -> int:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Hands-off upkeep for the UFC Fight Predictor")
-    ap.add_argument("command", choices=["all", "cards", "v2", "odds", "lock", "results", "refresh-odds"])
+    ap.add_argument("command", choices=["all", "cards", "v2", "odds", "lock", "results", "refresh-odds", "odds-history"])
     ap.add_argument("--dry-run", action="store_true", help="look and report; write nothing")
     ap.add_argument("--today", help="(testing only) pretend today is YYYY-MM-DD")
     ap.add_argument("--horizon", type=int, default=HORIZON_DAYS, help="how many days ahead to look for announced events")
@@ -673,6 +790,8 @@ def main(argv=None) -> int:
     ap.add_argument("--workdir", default=str(ROOT / "data" / "auto"), help="scratch folder for downloads")
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    if args.command == "odds-history":
+        return odds_history(model_v2.make_engine())
     return run(args)
 
 
