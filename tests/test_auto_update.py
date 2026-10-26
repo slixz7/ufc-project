@@ -368,3 +368,14 @@ def test_reasons_can_be_stored_as_json():
     d = model_v2.build_reasons(_row(), c, "A One", "B Two")
     assert json.loads(json.dumps(d))["schema"] == model_v2.REASONS_SCHEMA
     json.dumps(model_v3.v3_reasons("A One", "B Two", np.float32(0.59), np.float64(0.81), np.float32(0.83), 0.41, 0.99))
+
+
+def test_a_line_with_the_family_name_first_and_a_one_letter_spelling_difference_still_matches():
+    assert au.name_sim("Jeongyoung Lee", "Lee Jeong-yeong") >= 0.88
+    assert au.name_sim("Ko Seok-hyeon", "Seokhyeon Ko") >= 0.88
+    assert au.name_sim("Ryan Bader", "Dean Barry") < 0.88                      # same letters, different people: no shared name part, so no match
+    saved = pd.DataFrame({"bout_id": ["b1"], "event_date": [date(2026, 10, 31)], "a": ["Julian Erosa"], "b": ["Lee Jeong-yeong"]})
+    bout, home_is_a = au.match_line_to_bout("Julian Erosa", "Jeongyoung Lee", date(2026, 11, 1), saved)
+    assert bout.bout_id == "b1" and home_is_a is True
+    # and it is therefore not reported as a card problem
+    assert au.match_line_to_bout("Julian Erosa", "Jeongyoung Lee", date(2026, 11, 1), saved) is not None

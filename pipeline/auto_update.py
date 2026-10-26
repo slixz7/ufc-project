@@ -426,6 +426,10 @@ def name_sim(x: str, y: str) -> float:
             r = max(r, 0.97)
         elif len(os.path.commonprefix([ta[0], tb[0]])) >= 4:          # 'Ramazan' / 'Ramazonbek'
             r = max(r, 0.92)
+    # family name first, hyphens and a one-letter romanisation difference ('Jeongyoung Lee' / 'Lee Jeong-yeong'): the letters of the two
+    # names are almost the same. A shared name part is required, because different fighters can be anagrams (Ryan Bader / Dean Barry).
+    if set(ta) & set(tb) and difflib.SequenceMatcher(None, letters_key(a), letters_key(b)).ratio() >= 0.92:
+        r = max(r, 0.9)
     return r
 
 
