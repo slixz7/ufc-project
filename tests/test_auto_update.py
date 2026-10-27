@@ -951,3 +951,79 @@ def test_the_app_shows_the_prediction_in_all_three_bout_layouts_and_on_the_track
     src = (Path(__file__).resolve().parent.parent / "app" / "streamlit_app.py").read_text(encoding="utf-8")
     assert src.count("{dist_html(r)}") == 3 and "dist_section_html(distance_scores.distance_scores(dd), live_d)" in src
     assert "from distance_ui import" in src and 'sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "pipeline"))' in src
+
+
+# ---------------------------------------------------------------------------------------------- the public log also covers goes-the-distance predictions
+def _distance_frame(rows):
+    return pd.DataFrame(rows, columns=["bout_id", "event_date", "event_name", "bout_order", "fighter_a", "fighter_b", "scheduled_rounds", "p_distance", "locked_at_utc"])
+
+
+def test_the_distance_log_only_appends_and_never_logs_a_prediction_twice(tmp_path):
+    path = tmp_path / "picks_log" / "locked_distance.csv"
+    a = _distance_frame([("b1", "2026-10-31", "UFC X", 1, "A One", "B Two", 5, 0.61234, "2026-10-26T10:00:00Z")])
+    assert pick_log.append_distance(pick_log.new_distance_rows(a, pick_log.read_log(path, pick_log.DIST_COLUMNS)), path) == 1
+    first = path.read_text(encoding="utf-8")
+    b = pd.concat([a, _distance_frame([("b2", "2026-10-31", "UFC X", 2, "C Three", "D Four", 3, 0.4, "2026-10-26T10:00:00Z")])], ignore_index=True)
+    assert pick_log.append_distance(pick_log.new_distance_rows(b, pick_log.read_log(path, pick_log.DIST_COLUMNS)), path) == 1
+    assert path.read_text(encoding="utf-8").startswith(first)                                            # what was there is untouched
+    assert pick_log.append_distance(pick_log.new_distance_rows(b, pick_log.read_log(path, pick_log.DIST_COLUMNS)), path) == 0
+    text = path.read_text(encoding="utf-8")
+    assert text.splitlines()[0].split(",") == pick_log.DIST_COLUMNS and "0.6123" in text and "odds" not in text.lower()
+
+
+def test_a_logged_distance_prediction_that_changes_in_the_database_is_caught():
+    db = _distance_frame([("b1", "2026-10-31", "UFC X", 1, "A One", "B Two", 5, 0.6123, "t")])
+    logged = db.assign(logged_at_utc="x")
+    assert pick_log.changed_distance_rows(db, logged) == []
+    assert len(pick_log.changed_distance_rows(db.assign(p_distance=0.70), logged)) == 1                    # the probability moved
+    assert len(pick_log.changed_distance_rows(db.assign(scheduled_rounds=3), logged)) == 1                 # the rounds changed
+    assert pick_log.changed_distance_rows(db.assign(p_distance=0.61234), logged.assign(p_distance="0.6123")) == []     # rounding is not a change
+
+
+def test_the_log_step_writes_both_files_once_and_notices_tampering(tmp_path):
+    import sqlalchemy as sa
+    eng = _empty_engine(tmp_path)
+    model_distance.ensure_tables(eng)
+    base = dict(event_name="UFC X", event_date="2026-10-31", bout_order=1, weight_class="Lightweight", title_fight=0, fighter_a="A One", fighter_b="B Two")
+    pd.DataFrame([dict(base, bout_id="b1", p_a_wins=0.6, predicted_winner="A One", confidence=0.6, status="locked", predicted_at="2026-10-26 10:00:00")]).to_sql(
+        "upcoming_picks_v2", eng, if_exists="append", index=False)
+    pd.DataFrame([dict(bout_id=f"b{i}", event_name="UFC X", event_date="2026-10-31", bout_order=i, weight_class="Lightweight", fighter_a=f"A{i}", fighter_b=f"B{i}",
+                       scheduled_rounds=3, p_distance=0.5 + i / 10, p_base=0.48, status="locked", predicted_at="2026-10-26 10:00:00") for i in (1, 2)]).to_sql(
+        "upcoming_distance_v1", eng, if_exists="append", index=False)
+    picks, dist = tmp_path / "log" / "locked_picks.csv", tmp_path / "log" / "locked_distance.csv"
+    when = pd.Timestamp("2026-10-27T14:17:00Z").to_pydatetime()
+
+    rep = _Rep(); pick_log.step_pick_log(eng, date(2026, 10, 27), rep, dry_run=True, write=True, path=picks, dist_path=dist)
+    assert not picks.exists() and not dist.exists() and any("would be added" in x for x in rep.lines)             # a dry run writes nothing
+    rep = _Rep(); pick_log.step_pick_log(eng, date(2026, 10, 27), rep, dry_run=False, write=False, path=picks, dist_path=dist)
+    assert not dist.exists() and any("only the GitHub job writes the log" in x for x in rep.lines)                # your own computer does not write it
+    rep = _Rep(); pick_log.step_pick_log(eng, date(2026, 10, 27), rep, dry_run=False, write=True, path=picks, dist_path=dist, now=when)
+    assert len(picks.read_text(encoding="utf-8").splitlines()) == 2 and len(dist.read_text(encoding="utf-8").splitlines()) == 3          # header + rows
+    assert any("1 newly locked picks added" in x for x in rep.lines) and any("2 newly locked goes-the-distance predictions added" in x for x in rep.lines)
+    before = dist.read_text(encoding="utf-8")
+    rep = _Rep(); pick_log.step_pick_log(eng, date(2026, 10, 28), rep, dry_run=False, write=True, path=picks, dist_path=dist, now=when)
+    assert dist.read_text(encoding="utf-8") == before and rep.needs == []                                        # a second run adds nothing and complains about nothing
+    with eng.begin() as c:
+        c.execute(sa.text("UPDATE upcoming_distance_v1 SET p_distance = 0.99 WHERE bout_id = 'b1'"))
+    rep = _Rep(); pick_log.step_pick_log(eng, date(2026, 10, 29), rep, dry_run=False, write=True, path=picks, dist_path=dist, now=when)
+    assert rep.needs and "goes-the-distance prediction" in rep.needs[0] and "must never change" in rep.needs[0]  # a locked prediction that moved is flagged
+
+
+def test_the_verifier_reads_the_distance_history_too(tmp_path):
+    import os
+    def git(*a, when=None):
+        env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t", GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
+        if when:
+            env["GIT_COMMITTER_DATE"] = env["GIT_AUTHOR_DATE"] = when
+        subprocess.run(["git", *a], cwd=tmp_path, env=env, check=True, capture_output=True)
+    git("init", "-q")
+    log = tmp_path / pick_log.DIST_REL
+    early = _distance_frame([("b1", "2026-10-31", "UFC X", 1, "A One", "B Two", 5, 0.6, "2026-10-26T10:00:00Z")])
+    late = _distance_frame([("b2", "2026-10-24", "UFC Y", 1, "C Three", "D Four", 3, 0.5, "2026-10-20T10:00:00Z")])
+    pick_log.append_distance(early, log, now=pd.Timestamp("2026-10-27T14:17:00Z").to_pydatetime())
+    git("add", "."); git("commit", "-qm", "1", when="2026-10-27T14:17:00+00:00")                              # committed days BEFORE its event
+    pick_log.append_distance(late, log, now=pd.Timestamp("2026-10-27T14:17:00Z").to_pydatetime())
+    git("add", "."); git("commit", "-qm", "2", when="2026-10-27T14:18:00+00:00")                              # committed AFTER its event
+    report = pick_log.verify_report(tmp_path, pick_log.DIST_REL, ("bout_id",), "goes-the-distance predictions")
+    assert "1 of 2 logged goes-the-distance predictions were first committed before their event date" in report
+    assert pick_log.verify_report(tmp_path / "nowhere", pick_log.DIST_REL, ("bout_id",), "goes-the-distance predictions").startswith("No goes-the-distance predictions")

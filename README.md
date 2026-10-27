@@ -19,8 +19,8 @@ A web app that predicts UFC fights **before they happen**, locks each pick with 
 | **Also predicts** | The chance each fight goes the distance, with its own honest backtest and predictions locked before the event |
 | **Stack** | Python (pandas, scikit-learn), PostgreSQL on Neon, SQL window functions, Streamlit, GitHub Actions |
 | **Automation** | A daily job reads announced cards (Wikipedia), betting lines (The Odds API) and results (Kaggle) |
-| **Safety** | <!--n:n_tests-->72<!--/n--> offline tests run before every scheduled job, a dry-run mode, and a read-only database user behind the public app |
-| **Transparency** | Every locked pick is also published to a [public, time-stamped log](picks_log/ABOUT.md) in this repository |
+| **Safety** | <!--n:n_tests-->76<!--/n--> offline tests run before every scheduled job, a dry-run mode, and a read-only database user behind the public app |
+| **Transparency** | Every locked pick and goes-the-distance prediction is also published to a [public, time-stamped log](picks_log/ABOUT.md) in this repository |
 | **Cost** | Free tiers only |
 
 ## What this project is really about
@@ -114,7 +114,7 @@ The blend beats the opening line by a small but statistically clear amount (firs
 
 ## A second question: will the fight go the distance?
 
-Besides picking a winner, the app estimates the chance that each fight **goes to a decision**. It uses only how long these two fighters' earlier fights lasted (the share of the scheduled time they used, how often they went to a decision, how often they won or lost by a finish) and whether it is a title fight or five rounds. It was built the same honest way as the winner model: every prediction uses only earlier fights, upcoming ones are locked before the event, and the test is a walk-forward over <!--n:dist_n-->8,180<!--/n--> fights (<!--n:dist_first_year-->2006<!--/n--> to <!--n:dist_last_year-->2026<!--/n-->), each predicted by a model trained on earlier fights only. AUC is the chance that a fight that went the distance was given a higher probability than one that did not (0.5 is chance).
+Besides picking a winner, the app estimates the chance that each fight **goes to a decision**. It uses only how long these two fighters' earlier fights lasted (the share of the scheduled time they used, how often they went to a decision, how often they won or lost by a finish) and whether it is a title fight or five rounds. It was built the same honest way as the winner model: every prediction uses only earlier fights, upcoming ones are locked before the event and published to the public log, and the test is a walk-forward over <!--n:dist_n-->8,180<!--/n--> fights (<!--n:dist_first_year-->2006<!--/n--> to <!--n:dist_last_year-->2026<!--/n-->), each predicted by a model trained on earlier fights only. AUC is the chance that a fight that went the distance was given a higher probability than one that did not (0.5 is chance).
 
 <!--auto:distance_table-->
 
@@ -188,9 +188,9 @@ An unattended job that writes to a database needs guardrails, so these are delib
 
 - **It never guesses a name.** An unmatched or near-miss fighter name is held for human review. Only a name with no similar fighter becomes a debutant.
 - **A card that suddenly shrinks is refused**, because that is more likely a parsing problem than real.
-- **Locked picks never change, and anyone can check.** A pick is made before its event and the lock is enforced in code. Each day's new picks are also committed to a public log, so the repository history shows when each was made; `python pipeline/pick_log.py verify` reads that history and reports how many picks were committed before their event. The job also compares every logged pick with the database each run and raises an alert if one differs. [What the log does and does not prove](picks_log/ABOUT.md).
+- **Locked picks never change, and anyone can check.** A pick is made before its event and the lock is enforced in code. Each day's new picks and goes-the-distance predictions are also committed to a public log, so the repository history shows when each was made; `python pipeline/pick_log.py verify` reads that history and reports how many were committed before their event. The job also compares every logged row with the database each run and raises an alert if one differs. [What the log does and does not prove](picks_log/ABOUT.md).
 - **Dry-run first.** Every step can run in a mode that reports and writes nothing.
-- **Offline tests run before every scheduled job**, so a broken page reader stops the job before it writes anything. There are <!--n:n_tests-->72<!--/n-->, covering name matching, page parsing, the betting-line maths, that reasons add up to picks, the scoring maths, the pick log and the Discord digest.
+- **Offline tests run before every scheduled job**, so a broken page reader stops the job before it writes anything. There are <!--n:n_tests-->76<!--/n-->, covering name matching, page parsing, the betting-line maths, that reasons add up to picks, the scoring maths, the pick log and the Discord digest.
 - **Least privilege.** The public app connects with a read-only database user, I confirmed writes are refused, and the private odds table is hidden even from that user. The owner connection string lives only in GitHub's encrypted secrets, and the public app holds only the read-only one.
 - **Anything that needs a person ends the run with a non-zero exit code**, so GitHub emails me.
 

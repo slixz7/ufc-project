@@ -18,7 +18,7 @@ This is the hands-on guide: what each piece does, the commands to run it, and th
 | **Automation** | `pipeline/auto_update.py`, `.github/workflows/auto-update.yml` | Daily job: cards, lines, picks, results, odds history |
 | **Goes the distance** | `pipeline/model_distance.py`, `pipeline/distance_scores.py`, `app/distance_ui.py` | The chance each fight goes to a decision: backtest, locked predictions for upcoming bouts, grading, and its display |
 | **README numbers** | `pipeline/readme_numbers.py` | Keeps every live number and table in `README.md` equal to the database |
-| **Pick log** | `pipeline/pick_log.py`, `picks_log/` | Public, time-stamped record of every locked pick, committed by the daily job |
+| **Pick log** | `pipeline/pick_log.py`, `picks_log/` | Public, time-stamped record of every locked pick and goes-the-distance prediction (two files), committed by the daily job |
 | **Discord digest** | `pipeline/digest.py` | Posts newly locked picks and event results to a Discord channel, once each |
 | Web app | `app/streamlit_app.py` | Read-only Streamlit app |
 | Tests | `tests/test_auto_update.py` | Offline tests that run before every scheduled job |
@@ -82,7 +82,7 @@ All database commands below need a PostgreSQL database (a free hosted one such a
    python pipeline/auto_update.py pick-log --dry-run          # how many locked picks are not in the public log yet
    python pipeline/auto_update.py digest --dry-run            # what would be posted to Discord (needs DISCORD_WEBHOOK_URL)
    python pipeline/auto_update.py discord-test                # send one test message to check the webhook
-   python pipeline/pick_log.py verify                         # in a git clone: when did each logged pick first appear in the history?
+   python pipeline/pick_log.py verify                         # in a git clone: when did each logged pick and prediction first appear in the history?
    python pipeline/readme_numbers.py check                    # is README.md in step with the database? (any connection string works; it only reads)
    python pipeline/readme_numbers.py update                   # rewrite the generated numbers and tables in README.md
    ```
