@@ -1,0 +1,48 @@
+bout_id,event_date,event_name,fighter_a,fighter_b,scheduled_rounds,p_distance,locked_at_utc,logged_at_utc
+8fbca9c96ed4,2026-10-31,UFC Fight Night: Moicano vs. Nolan,Renato Moicano,Tom Nolan,5,0.2981,2026-10-27T06:02:19Z,2026-10-27T06:22:03Z
+e91e71106233,2026-10-31,UFC Fight Night: Moicano vs. Nolan,Randy Brown,Jacobe Smith,3,0.3534,2026-10-27T06:02:19Z,2026-10-27T06:22:03Z
+54323629857d,2026-10-31,UFC Fight Night: Moicano vs. Nolan,Yana Santos,Luana Santos,3,0.6056,2026-10-27T06:02:19Z,2026-10-27T06:22:03Z
+ed519cadbccd,2026-10-31,UFC Fight Night: Moicano vs. Nolan,Ode' Osbourne,Cody Durden,3,0.3361,2026-10-27T06:02:19Z,2026-10-27T06:22:03Z
+d64c9b2ca616,2026-10-31,UFC Fight Night: Moicano vs. Nolan,Zachary Reese,Mickey Gall,3,0.3060,2026-10-27T06:02:19Z,2026-10-27T06:22:03Z
+ef595ff0de34,2026-10-31,UFC Fight Night: Moicano vs. Nolan,Jean-Paul Lebosnoyani,Farman Hasanov,3,0.6381,2026-10-27T06:02:19Z,2026-10-27T06:22:03Z
+b7873f303413,2026-10-31,UFC Fight Night: Moicano vs. Nolan,Francis Marshall,Dakota Hope,3,0.5611,2026-10-27T06:02:19Z,2026-10-27T06:22:03Z
+fa37b76ef046,2026-10-31,UFC Fight Night: Moicano vs. Nolan,Rodrigo Sezinando,Theodor Berggren,3,0.3247,2026-10-27T06:02:19Z,2026-10-27T06:22:03Z
+7a5964d84fa6,2026-10-31,UFC Fight Night: Moicano vs. Nolan,Julian Erosa,Lee Jeong-yeong,3,0.4280,2026-10-27T06:02:19Z,2026-10-27T06:22:03Z
+b8d145b83d87,2026-10-31,UFC Fight Night: Moicano vs. Nolan,Nick Klein,Joseph Kropschot,3,0.3712,2026-10-27T06:02:19Z,2026-10-27T06:22:03Z
+49286b88f586,2026-10-31,UFC Fight Night: Moicano vs. Nolan,Talita Alencar,Piera Rodriguez,3,0.7144,2026-10-27T06:02:19Z,2026-10-27T06:22:03Z
+fb214a36ead8,2026-10-31,UFC Fight Night: Moicano vs. Nolan,Lucia Szabová,Tainara Lisboa,3,0.5068,2026-10-27T06:02:19Z,2026-10-27T06:22:03Z
+698a8ce5549a,2026-11-07,UFC Fight Night: Bonfim vs. Brady,Gabriel Bonfim,Sean Brady,5,0.3886,2026-10-27T06:02:19Z,2026-10-27T06:22:03Z
+2626848f81e0,2026-11-07,UFC Fight Night: Bonfim vs. Brady,Tatiana Suarez,Virna Jandiroba,3,0.6135,2026-10-27T06:02:19Z,2026-10-27T06:22:03Z
+63eac42b410d,2026-11-07,UFC Fight Night: Bonfim vs. Brady,Davey Grant,Elijah Smith,3,0.4962,2026-10-27T06:02:19Z,2026-10-27T06:22:03Z
+515be173d01a,2026-11-07,UFC Fight Night: Bonfim vs. Brady,Ko Seok-hyeon,Wellington Turman,3,0.6098,2026-10-27T06:02:19Z,2026-10-27T06:22:03Z
+684d5d2b27da,2026-11-07,UFC Fight Night: Bonfim vs. Brady,Mantas Kondratavičius,Andre Petroski,3,0.5323,2026-10-27T06:02:19Z,2026-10-27T06:22:03Z
+57f3da484765,2026-11-07,UFC Fight Night: Bonfim vs. Brady,Billy Elekana,Lucas Fernando,3,0.4320,2026-10-27T06:02:19Z,2026-10-27T06:22:03Z
+1d36336864cf,2026-11-07,UFC Fight Night: Bonfim vs. Brady,Karine Silva,Gabriella Fernandes,3,0.5707,2026-10-27T06:02:19Z,2026-10-27T06:22:03Z
+10bd50a43df5,2026-11-07,UFC Fight Night: Bonfim vs. Brady,José Mauro Delano,Murtazali Magomedov,3,0.4778,2026-10-27T06:02:19Z,2026-10-27T06:22:03Z
+85387f9e7c5d,2026-11-07,UFC Fight Night: Bonfim vs. Brady,Keiichiro Nakamura,Ollie Schmid,3,0.3797,2026-10-27T06:02:19Z,2026-10-27T06:22:03Z
+bc0b3180b80a,2026-11-07,UFC Fight Night: Bonfim vs. Brady,Austin Bashi,Lucas Brennan,3,0.5762,2026-10-27T06:02:19Z,2026-10-27T06:22:03Z
+d262cf0b1272,2026-11-07,UFC Fight Night: Bonfim vs. Brady,Priscila Cachoeira,Nina Nikolija Milošević,3,0.3194,2026-10-27T06:02:19Z,2026-10-27T06:22:03Z
+8bfc7a60ef5b,2026-11-07,UFC Fight Night: Bonfim vs. Brady,Jonny Parsons,José Henrique Souza,3,0.5559,2026-10-27T06:02:19Z,2026-10-27T06:22:03Z
+5c25c68f1b0f,2026-11-14,UFC 334,Ciryl Gane,Josh Hokit,5,0.3515,2026-10-27T06:02:19Z,2026-10-27T06:22:03Z
+5719858ad828,2026-11-14,UFC 334,Kayla Harrison,Amanda Nunes,5,0.3168,2026-10-27T06:02:19Z,2026-10-27T06:22:03Z
+132fb928efb8,2026-11-14,UFC 334,Caio Borralho,Yousri Belgaroui,3,0.6228,2026-10-27T06:02:19Z,2026-10-27T06:22:03Z
+f31d122df372,2026-11-14,UFC 334,Uroš Medić,Kevin Holland,3,0.2870,2026-10-27T06:02:19Z,2026-10-27T06:22:03Z
+8daf19c6cc95,2026-11-14,UFC 334,Bilal Hasan,Luis Gurule,3,0.4605,2026-10-27T06:02:19Z,2026-10-27T06:22:03Z
+8bf9cafb5fe6,2026-11-14,UFC 334,Stephen Thompson,Charles Radtke,3,0.4848,2026-10-27T06:02:19Z,2026-10-27T06:22:03Z
+356ee38be9f3,2026-11-14,UFC 334,Drew Dober,Chris Duncan,3,0.3439,2026-10-27T06:02:19Z,2026-10-27T06:22:03Z
+b3c66bb496db,2026-11-14,UFC 334,Jim Miller,Terrance McKinney,3,0.2239,2026-10-27T06:02:19Z,2026-10-27T06:22:03Z
+c10bf15eca75,2026-11-14,UFC 334,Macy Chiasson,Beatriz Mesquita,3,0.4126,2026-10-27T06:02:19Z,2026-10-27T06:22:03Z
+2f486b5e67da,2026-11-21,UFC Fight Night: Procházka vs. Stirling,Jiří Procházka,Navajo Stirling,5,0.3305,2026-10-27T06:02:19Z,2026-10-27T06:22:03Z
+473e0aeff45b,2026-11-21,UFC Fight Night: Procházka vs. Stirling,Aljamain Sterling,Kevin Vallejos,3,0.5189,2026-10-27T06:02:19Z,2026-10-27T06:22:03Z
+73fd2b7d99e8,2026-11-21,UFC Fight Night: Procházka vs. Stirling,Dan Hooker,Brian Ortega,3,0.4299,2026-10-27T06:02:19Z,2026-10-27T06:22:03Z
+de47c8131b6f,2026-11-21,UFC Fight Night: Procházka vs. Stirling,Jared Cannonier,Ikram Aliskerov,3,0.4328,2026-10-27T06:02:19Z,2026-10-27T06:22:03Z
+87a83afd8db1,2026-11-21,UFC Fight Night: Procházka vs. Stirling,Shamil Gaziev,Tallison Teixeira,3,0.2316,2026-10-27T06:02:19Z,2026-10-27T06:22:03Z
+35eb92e7b34f,2026-11-21,UFC Fight Night: Procházka vs. Stirling,Jake Matthews,Tahir Abdullayev,3,0.5554,2026-10-27T06:02:19Z,2026-10-27T06:22:03Z
+c7f92902cdc5,2026-11-21,UFC Fight Night: Procházka vs. Stirling,Aleksandre Topuria,Santiago Luna,3,0.5885,2026-10-27T06:02:19Z,2026-10-27T06:22:03Z
+4e525c95773a,2026-11-21,UFC Fight Night: Procházka vs. Stirling,Asu Almabayev,Kyoji Horiguchi,3,0.6157,2026-10-27T06:02:19Z,2026-10-27T06:22:03Z
+49b165571cb9,2026-11-21,UFC Fight Night: Procházka vs. Stirling,Amir Albazi,Alessandro Costa,3,0.4943,2026-10-27T06:02:19Z,2026-10-27T06:22:03Z
+156de01a4416,2026-12-12,UFC 335,Charles Oliveira,Diego Lopes,5,0.2833,2026-10-27T06:02:19Z,2026-10-27T06:22:03Z
+75f0f3b830e9,2026-12-12,UFC 335,Sergei Pavlovich,Alex Pereira,3,0.2551,2026-10-27T06:02:19Z,2026-10-27T06:22:03Z
+d65b5ec9121e,2026-12-12,UFC 335,Brandon Moreno,Charles Johnson,3,0.6506,2026-10-27T06:02:19Z,2026-10-27T06:22:03Z
+6fd084f14619,2026-12-12,UFC 335,Maycee Barber,Carli Judice,3,0.5375,2026-10-27T06:02:19Z,2026-10-27T06:22:03Z
+998c87e92bf7,2026-12-12,UFC 335,Quentin Pasley,Junior Tafa,3,0.3244,2026-10-27T06:02:19Z,2026-10-27T06:22:03Z
