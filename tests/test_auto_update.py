@@ -518,3 +518,221 @@ def test_a_rate_limited_post_waits_as_asked_and_tries_once_more():
     waited = []
     s = S()
     assert digest.post("https://discord.com/api/webhooks/123456789/abc", "hi", s, sleep=waited.append) == 204 and waited == [2.0] and s.n == 2
+
+
+# ---------------------------------------------------------------------------------------------- README numbers from the database
+import readme_numbers  # noqa: E402
+
+
+def _real_ddl(tables):
+    """CREATE TABLE statements built from the project's real SQL files, so a renamed column breaks a test."""
+    import re
+    root = Path(__file__).resolve().parent.parent
+    out = {}
+    for f in ("sql/model_v2.sql", "sql/model_v3.sql"):
+        s = (root / f).read_text(encoding="utf-8")
+        for m in re.finditer(r"CREATE TABLE IF NOT EXISTS (\w+)\s*\((.*?)\n\);", s, re.S):
+            if m.group(1) in tables:
+                cols = []
+                for ln in m.group(2).splitlines():
+                    ln = ln.split("--")[0].strip().rstrip(",")
+                    if ln and not ln.upper().startswith(("PRIMARY", "UNIQUE", "CONSTRAINT")):
+                        cols.append(f"{ln.split()[0]} {ln.split()[1]}")
+                out[m.group(1)] = f"CREATE TABLE {m.group(1)} ({', '.join(cols)})"
+    return out
+
+
+def _empty_engine(tmp_path):
+    import sqlalchemy as sa
+    eng = sa.create_engine(f"sqlite:///{tmp_path / 'schema.db'}")
+    ddl = _real_ddl({"fight_picks_v2", "fight_picks_v3", "upcoming_picks_v2", "upcoming_picks_v3"})
+    assert len(ddl) == 4
+    with eng.begin() as c:
+        for s in ddl.values():
+            c.exec_driver_sql(s)
+        c.exec_driver_sql("CREATE TABLE fight_reasons (fight_url TEXT, version TEXT, reasons TEXT)")
+    return eng
+
+
+def test_the_generator_only_reads_columns_that_exist_in_the_real_schema(tmp_path):
+    frames = readme_numbers.load_frames(_empty_engine(tmp_path))             # raises if any column name is wrong
+    assert frames["v3"].empty and frames["market_share"] is None
+    nums = readme_numbers.compute(frames, n_tests=1)
+    assert nums.skipped and "acc_v3" not in nums.values                      # nothing to compute from empty tables, and it says so
+
+
+def _synthetic(tmp_path, claims_hold=True, seed=3, n=6000):
+    """A database with known answers: the blend is better than the line only where both fighters have history."""
+    import sqlalchemy as sa
+    eng = _empty_engine(tmp_path)
+    rng = np.random.default_rng(seed)
+    p_true = rng.uniform(0.25, 0.75, n)
+    y = rng.uniform(size=n) < p_true
+    tier = rng.choice(["full", "limited", "debut"], n, p=[0.5, 0.3, 0.2])
+    p_v2 = np.clip(p_true + rng.normal(0, 1, n) * np.select([tier == "full", tier == "limited"], [0.08, 0.14], 0.30), 0.05, 0.95)   # the model is weakest on debutants
+    noisy = np.clip(p_true + rng.normal(0, 0.12, n), 0.05, 0.95)
+    mkt = np.where(tier == "full", noisy, p_true)                             # the line is only poor where both fighters have history
+    blend = p_true if claims_hold else mkt                                    # a calibrated blend: better than the line only in the "full" group
+    dates = pd.Timestamp("2016-01-01") + pd.to_timedelta(rng.integers(0, 3600, n), unit="D")
+    pick = lambda p: np.where(p >= 0.5, 1, 0)
+    d3 = pd.DataFrame({"fight_url": [f"f{i}" for i in range(n)], "event_date": dates.strftime("%Y-%m-%d"), "fighter_a": "A", "actual_winner": np.where(y, "A", "B"),
+                       "p_v2_a": p_v2, "market_prob_a": mkt, "p_a_wins": blend, "confidence": np.maximum(blend, 1 - blend), "tier": tier,
+                       "correct": (pick(blend) == y).astype(int), "v2_correct": (pick(p_v2) == y).astype(int), "market_correct": (pick(mkt) == y).astype(int)})
+    d3.to_sql("fight_picks_v3", eng, if_exists="append", index=False)
+    rows = []                                                                 # yearly model-only accuracy: 2012 has too few fights to count
+    for year, count, acc in [(2012, 150, 0.80), (2013, 300, 0.55), (2014, 300, 0.60), (2015, 300, 0.66), (2016, 300, 0.62)]:
+        k = round(acc * count)
+        rows += [(f"v2-{year}-{i}", f"{year}-06-01", "model", int(i < k)) for i in range(count)]
+    rows += [("early-1", "2001-01-01", "early_rule", 1)]
+    pd.DataFrame(rows, columns=["fight_url", "event_date", "method", "correct"]).to_sql("fight_picks_v2", eng, if_exists="append", index=False)
+    conf2 = [0.62, 0.56, 0.52, 0.60, 0.58, 0.61, 0.59, 0.61, 0.55, 0.54, 0.81, 0.55, 0.65, 0.74]
+    conf3 = [0.55, 0.55, 0.50, 0.56, 0.60, 0.61, 0.83, 0.50, 0.54, 0.81, 0.56, 0.55, 0.52, 0.82]
+    mk = lambda conf, k, name, status="locked": pd.DataFrame({"bout_id": [f"{name}{i}" for i in range(len(conf))], "event_name": name, "event_date": "2026-10-24",
+                                                           "status": status, "confidence": conf, "correct": [int(i < k) for i in range(len(conf))],
+                                                           "graded_at": "2026-10-25 12:00:00"})
+    pd.concat([mk(conf2, 8, "UFC 333: Volkanovski vs. Evloev"), mk([0.9], 0, "UFC 332: Other"), mk([0.7], 1, "UFC 333: Volkanovski vs. Evloev", "cancelled")]).to_sql("upcoming_picks_v2", eng, if_exists="append", index=False)
+    mk(conf3, 8, "UFC 333: Volkanovski vs. Evloev").to_sql("upcoming_picks_v3", eng, if_exists="append", index=False)
+    with eng.begin() as c:
+        c.execute(sa.text("INSERT INTO fight_reasons VALUES ('f1', 'v3', :j)"), {"j": json.dumps({"market_share": 0.71})})
+    return eng, d3, conf2, conf3
+
+
+import json  # noqa: E402
+
+
+def test_every_number_comes_from_the_database_with_the_stated_formatting(tmp_path):
+    eng, d3, conf2, conf3 = _synthetic(tmp_path)
+    v = readme_numbers.compute(readme_numbers.load_frames(eng), n_tests=48).values
+    assert v["n_fights"] == f"{len(d3):,}" and v["first_year"] == "2016" and v["last_year"] in ("2025", "2026")
+    assert v["acc_v3"] == f"{d3.correct.mean() * 100:.1f}%" and v["acc_v2"] == f"{d3.v2_correct.mean() * 100:.1f}%" and v["acc_line"] == f"{d3.market_correct.mean() * 100:.1f}%"
+    assert (v["year_lo"], v["year_hi"], v["year_min_fights"]) == ("55%", "66%", "200")        # 2012 (150 fights, 80%) and the early-rule fight do not count
+    assert (v["market_weight"], v["model_weight"]) == ("71%", "29%")
+    assert (v["u333_n"], v["u333_v2"], v["u333_v3"]) == ("14", "8", "8")                      # the other event and the cancelled bout are ignored
+    assert v["u333_expected_v2"] == f"{sum(conf2):.1f}" and v["u333_expected_v3"] == f"{sum(conf3):.1f}"
+    assert v["n_tests"] == "48" and v["n_live_needed"].replace(",", "").isdigit()
+    dis = (d3.p_v2_a >= .5) != (d3.p_a_wins >= .5)
+    assert v["dis_share"] == f"{dis.mean() * 100:.1f}%" and v["dis_blend"] == f"{d3[dis].correct.mean() * 100:.1f}%"
+
+
+def test_the_tables_are_well_formed_markdown(tmp_path):
+    eng, d3, *_ = _synthetic(tmp_path)
+    blocks = readme_numbers.compute(readme_numbers.load_frames(eng), n_tests=1).blocks
+    assert set(blocks) == {"results_accuracy", "results_tiers", "calibration", "scoring_table", "scoring_compare"}
+    for name, md in blocks.items():
+        rows = md.splitlines()
+        assert all(r.startswith("|") and r.endswith("|") for r in rows), name
+        assert len({r.count("|") for r in rows}) == 1, f"{name}: every row needs the same number of columns"
+        assert set(rows[1].replace("|", "")) == {"-"}, name                                    # the separator row
+    assert sum(1 for r in blocks["results_tiers"].splitlines()[2:]) == 3 and "Coin flip | 50% |" in blocks["results_accuracy"]
+    assert blocks["scoring_table"].count("**") == 4                                            # only the best predictor is bold (two cells)
+
+
+def test_claims_that_hold_pass_and_claims_that_stop_holding_are_flagged(tmp_path):
+    (tmp_path / "a").mkdir()
+    good, *_ = _synthetic(tmp_path / "a")
+    assert readme_numbers.compute(readme_numbers.load_frames(good), n_tests=1).broken_claims == []
+    (tmp_path / "b").mkdir()
+    bad, *_ = _synthetic(tmp_path / "b", claims_hold=False)                                    # the blend is now no better than the line
+    broken = " ".join(readme_numbers.compute(readme_numbers.load_frames(bad), n_tests=1).broken_claims)
+    assert "includes zero" in broken and "edge comes from fights where both fighters have a UFC history" in broken
+
+
+def test_apply_rewrites_only_the_markers_keeps_the_prose_and_is_idempotent():
+    text = ("Intro with a **<!--n:acc_v3-->old<!--/n-->** number and an unknown <!--n:nope-->keep<!--/n-->.\n\n"
+            "<!--auto:results_accuracy-->\n\n| stale |\n\n<!--/auto:results_accuracy-->\n\nProse stays exactly as written.\n")
+    nums = readme_numbers.Numbers(values={"acc_v3": "65.4%"}, blocks={"results_accuracy": "| Predictor | Right |\n|---|---|\n| x | 1% |"})
+    new, changes, unfilled = readme_numbers.apply(text, nums)
+    assert "**<!--n:acc_v3-->65.4%<!--/n-->**" in new and "| x | 1% |" in new and "| stale |" not in new
+    assert "<!--n:nope-->keep<!--/n-->" in new and unfilled == ["nope"]                       # a marker it cannot fill is left alone, never blanked
+    assert new.endswith("Prose stays exactly as written.\n") and new.startswith("Intro with a ")
+    again, changes2, _ = readme_numbers.apply(new, nums)
+    assert again == new and changes2 == []                                                     # running it twice changes nothing
+    crlf, _, _ = readme_numbers.apply(text.replace("\n", "\r\n"), nums)
+    assert "\r\n" in crlf and "\n" not in crlf.replace("\r\n", "")                             # Windows line endings survive
+
+
+def test_refresh_fixes_a_stale_readme_and_a_second_run_finds_nothing_to_do(tmp_path):
+    eng, d3, *_ = _synthetic(tmp_path)
+    path = tmp_path / "README.md"
+    path.write_text("Best: <!--n:acc_v3-->12.3%<!--/n--> of <!--n:n_fights-->1<!--/n--> fights, <!--n:n_tests-->7<!--/n--> tests.\n", encoding="utf-8")
+    checked = readme_numbers.refresh(eng, path, write=False, n_tests=48)
+    assert len(checked["changes"]) == 3 and "12.3%" in path.read_text(encoding="utf-8")        # check mode reports but does not write
+    fixed = readme_numbers.refresh(eng, path, write=True, n_tests=48)
+    assert len(fixed["changes"]) == 3 and f"{d3.correct.mean() * 100:.1f}%" in path.read_text(encoding="utf-8") and "<!--n:n_tests-->48<!--/n-->" in path.read_text(encoding="utf-8")
+    assert readme_numbers.refresh(eng, path, write=True, n_tests=48)["changes"] == []
+
+
+def test_every_marker_in_the_real_readme_is_known_and_closed():
+    text = (Path(__file__).resolve().parent.parent / "README.md").read_text(encoding="utf-8")
+    names = {m.group(1) for m in readme_numbers.TOKEN_RE.finditer(text)} | {m.group(2) for m in readme_numbers.BLOCK_RE.finditer(text)}
+    assert names and names <= readme_numbers.known_names(), names - readme_numbers.known_names()
+    assert text.count("<!--n:") == text.count("<!--/n-->") == len(readme_numbers.TOKEN_RE.findall(text))
+    assert text.count("<!--auto:") == text.count("<!--/auto:") == len(readme_numbers.BLOCK_RE.findall(text))
+
+
+def test_the_readme_step_runs_on_mondays_and_otherwise_stays_out_of_the_way(tmp_path):
+    eng, *_ = _synthetic(tmp_path)
+
+    class Rep:
+        def __init__(self):
+            self.lines, self.needs = [], []
+        def add(self, title, *ls):
+            self.lines += list(ls)
+        def need(self, t):
+            self.needs.append(t)
+    rep = Rep()
+    readme_numbers.step_readme(eng, date(2026, 10, 27), rep, dry_run=True, write=False)       # a Tuesday
+    assert rep.lines == ["Only refreshed on Mondays."]
+
+
+_MARKED = "Best <!--n:acc_v3-->0%<!--/n--> in <!--n:n_tests-->0<!--/n--> tests. Prose.\n"
+
+
+class _Rep:
+    def __init__(self):
+        self.lines, self.needs = [], []
+    def add(self, title, *ls):
+        self.lines += list(ls)
+    def need(self, t):
+        self.needs.append(t)
+
+
+def test_the_monday_step_writes_only_when_it_may_and_only_when_something_changed(tmp_path, monkeypatch):
+    eng, d3, *_ = _synthetic(tmp_path)
+    path = tmp_path / "README.md"
+    monkeypatch.setattr(readme_numbers, "README", path)
+    monkeypatch.setattr(readme_numbers, "count_tests", lambda *a, **k: 48)
+    monday = date(2026, 10, 26)
+    path.write_text(_MARKED, encoding="utf-8")
+    rep = _Rep(); readme_numbers.step_readme(eng, monday, rep, dry_run=True, write=True)             # a dry run reports but never writes
+    assert path.read_text(encoding="utf-8") == _MARKED and "would change 2" in rep.lines[0]
+    rep = _Rep(); readme_numbers.step_readme(eng, monday, rep, dry_run=False, write=False)          # your own computer: tells you how, writes nothing
+    assert path.read_text(encoding="utf-8") == _MARKED and any("only the GitHub job writes README.md" in x for x in rep.lines)
+    rep = _Rep(); readme_numbers.step_readme(eng, monday, rep, dry_run=False, write=True)           # the GitHub job
+    assert f"{d3.correct.mean() * 100:.1f}%" in path.read_text(encoding="utf-8") and "refreshed 2" in rep.lines[0] and "the workflow commits it" in rep.lines[0]
+    rep = _Rep(); readme_numbers.step_readme(eng, monday, rep, dry_run=False, write=True)
+    assert rep.lines == ["README numbers already match the database."]                              # nothing changed, so nothing to commit
+
+
+def test_a_claim_that_stops_holding_asks_for_attention_in_the_daily_report(tmp_path, monkeypatch):
+    eng, *_ = _synthetic(tmp_path, claims_hold=False)
+    monkeypatch.setattr(readme_numbers, "README", tmp_path / "README.md")
+    (tmp_path / "README.md").write_text(_MARKED, encoding="utf-8")
+    monkeypatch.setattr(readme_numbers, "count_tests", lambda *a, **k: 48)
+    rep = _Rep(); readme_numbers.step_readme(eng, date(2026, 10, 26), rep, dry_run=True, write=True)
+    assert rep.needs and rep.needs[0].startswith("README: ")
+
+
+def test_the_command_line_exit_codes(tmp_path, monkeypatch, capsys):
+    import model_v2
+    eng, *_ = _synthetic(tmp_path)
+    path = tmp_path / "README.md"
+    path.write_text(_MARKED, encoding="utf-8")
+    monkeypatch.setattr(model_v2, "make_engine", lambda: eng)
+    monkeypatch.setattr(readme_numbers, "README", path)
+    monkeypatch.setattr(readme_numbers, "count_tests", lambda *a, **k: 48)
+    assert readme_numbers.main(["check"]) == 1 and "out of date" in capsys.readouterr().out         # stale: exit 1, and nothing was written
+    assert path.read_text(encoding="utf-8") == _MARKED
+    assert readme_numbers.main(["update"]) == 0 and path.read_text(encoding="utf-8") != _MARKED
+    assert readme_numbers.main(["check"]) == 0 and "match the database" in capsys.readouterr().out   # now in step
+    assert readme_numbers.main(["nonsense"]) == 2

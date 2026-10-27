@@ -1,3 +1,5 @@
+<!-- Numbers and tables inside generated markers come from the database (pipeline/readme_numbers.py). Edit the prose freely, but not between the markers. -->
+
 # UFC Fight Predictor
 
 A web app that predicts UFC fights **before they happen**, locks each pick with a timestamp, explains it in plain language, and grades itself against the real results. A daily job keeps it running: it loads newly announced cards, locks picks, and grades finished events.
@@ -13,10 +15,10 @@ A web app that predicts UFC fights **before they happen**, locks each pick with 
 | | |
 |---|---|
 | **What it does** | Picks a winner for every UFC fight, past and upcoming, and shows the reasoning behind each pick |
-| **Best result** | **65.4%** of 5,279 fights picked correctly (2016 to 2026), every pick made using only data from before that fight. A coin flip is 50% |
+| **Best result** | **<!--n:acc_v3-->65.4%<!--/n-->** of <!--n:n_fights-->5,279<!--/n--> fights picked correctly (<!--n:first_year-->2016<!--/n--> to <!--n:last_year-->2026<!--/n-->), every pick made using only data from before that fight. A coin flip is 50% |
 | **Stack** | Python (pandas, scikit-learn), PostgreSQL on Neon, SQL window functions, Streamlit, GitHub Actions |
 | **Automation** | A daily job reads announced cards (Wikipedia), betting lines (The Odds API) and results (Kaggle) |
-| **Safety** | 48 offline tests run before every scheduled job, a dry-run mode, and a read-only database user behind the public app |
+| **Safety** | <!--n:n_tests-->59<!--/n--> offline tests run before every scheduled job, a dry-run mode, and a read-only database user behind the public app |
 | **Transparency** | Every locked pick is also published to a [public, time-stamped log](picks_log/ABOUT.md) in this repository |
 | **Cost** | Free tiers only |
 
@@ -30,7 +32,9 @@ Most fight-prediction projects end with a notebook and one accuracy number. This
 
 ## Results, honestly
 
-All rows are measured on the **same 5,279 fights (2016 to 2026)**, each predicted from earlier fights only.
+All rows are measured on the **same <!--n:n_fights-->5,279<!--/n--> fights (<!--n:first_year-->2016<!--/n--> to <!--n:last_year-->2026<!--/n-->)**, each predicted from earlier fights only.
+
+<!--auto:results_accuracy-->
 
 | Predictor | Right |
 |---|---|
@@ -39,7 +43,11 @@ All rows are measured on the **same 5,279 fights (2016 to 2026)**, each predicte
 | Bookmakers' opening line alone | 64.9% |
 | **Statistical model + the betting market (v3)** | **65.4%** |
 
+<!--/auto:results_accuracy-->
+
 The market-informed model helps most where the statistics are thinnest:
+
+<!--auto:results_tiers-->
 
 | Fighters' UFC history | Fights | Model alone | Model + market |
 |---|---|---|---|
@@ -47,26 +55,57 @@ The market-informed model helps most where the statistics are thinnest:
 | The less experienced has 1 to 2 | 1,466 | 62.3% | 63.8% |
 | A fighter is a debutant | 1,082 | 59.2% | 67.2% |
 
+<!--/auto:results_tiers-->
+
 **How to read this honestly**
 
-- **The market is doing most of the work.** The blend puts about 71% of its weight on the betting market and 29% on my model. The model alone is still a legitimate 61 to 62% predictor, but I would not claim to beat the bookmakers on my own. Scoring the probabilities (below) shows the model does add a small amount on top of the line.
-- **The probabilities are honest.** Picks stated at 80% or more were right 86.9% of the time (497 fights). The 60 to 70% bucket was a little optimistic (stated 65%, right 61.8%).
-- **The market and the model disagree on about a quarter of fights** (25.5%). In those fights the blended pick was right 57.1% of the time and the model-only pick 42.9%, which is the clearest evidence the market adds information the statistics do not have.
+- **The market is doing most of the work.** The blend puts about <!--n:market_weight-->71%<!--/n--> of its weight on the betting market and <!--n:model_weight-->29%<!--/n--> on my model. The model alone is still a legitimate <!--n:acc_v2-->61.8%<!--/n--> predictor, but I would not claim to beat the bookmakers on my own. Scoring the probabilities (below) shows the model does add a small amount on top of the line.
+- **The probabilities are honest.** The calibration table below compares each stated confidence with how often those picks were right; the two track each other closely, and the most confident picks were not over-confident.
+- **The market and the model disagree on <!--n:dis_share-->25.5%<!--/n--> of fights.** In those fights the blended pick was right <!--n:dis_blend-->57.1%<!--/n--> of the time and the model-only pick <!--n:dis_model-->42.9%<!--/n-->, which is the clearest evidence the market adds information the statistics do not have.
 - **The backtest uses opening lines.** Live picks lock two days before an event using that day's line, so I expect results between the opening-line figure above and the closing-line figure (67.0% for the line alone, 67.6% blended), not better than either.
-- **One card is noise.** A card has 10 to 14 fights, so a single event can land anywhere. The yearly accuracy of the model ranges from about 54% to 70%.
+- **One card is noise.** A card has 10 to 14 fights, so a single event can land anywhere. Across years with at least <!--n:year_min_fights-->200<!--/n--> scored fights, the model's yearly accuracy ranges from about <!--n:year_lo-->55%<!--/n--> to <!--n:year_hi-->65%<!--/n-->.
+
+**Calibration:** for the market-informed picks, how often they were right at each stated confidence.
+
+<!--auto:calibration-->
+
+| Stated confidence | Fights | Average stated | Actually right |
+|---|---|---|---|
+| 50 to 60% | 1,575 | 55.2% | 55.0% |
+| 60 to 70% | 1,854 | 65.0% | 61.8% |
+| 70 to 80% | 1,353 | 74.5% | 74.7% |
+| 80% and up | 497 | 84.7% | 86.9% |
+
+<!--/auto:calibration-->
 
 ### Scoring the probabilities, not just the winners
 
-Accuracy only counts whether the favourite won, which is a blunt tool: 65.4% against 64.9% cannot separate the blend from the line. Log loss and Brier score judge the probability itself, so a 90% pick that loses costs far more than a 55% pick that loses (lower is better; a coin flip scores 0.693 on log loss). Same 5,279 fights:
+Accuracy only counts whether the favourite won, which is a blunt tool: 65.4% against 64.9% cannot separate the blend from the line. Log loss and Brier score judge the probability itself, so a 90% pick that loses costs far more than a 55% pick that loses (lower is better; a coin flip scores 0.693 on log loss). Same <!--n:n_fights-->5,279<!--/n--> fights:
+
+<!--auto:scoring_table-->
 
 | Predictor | Log loss | Brier score |
 |---|---|---|
 | Coin flip | 0.6931 | 0.2500 |
 | Statistical model alone (v2) | 0.6515 | 0.2298 |
 | Bookmakers' opening line alone | 0.6265 | 0.2184 |
-| **Model + market (v3)** | **0.6201** | **0.2157** |
+| Model + market (v3) | **0.6201** | **0.2157** |
 
-The blend beats the opening line by **0.0065 log loss per fight (95% interval 0.0036 to 0.0093)**: small, but statistically clear. It comes from fights where both fighters have a UFC history (0.0088, interval 0.0048 to 0.0128). For debutants and thin histories the blend and the line cannot be told apart, so there the market is doing the work. Two caveats: this is against the *opening* line, which is less sharp than the closing line, and a gap this small would take roughly 2,000 live fights to confirm, so the backtest is the evidence and the live record is for transparency. Every figure here comes from one command, `python pipeline/model_v3.py scoring`, and the Track record page shows the same tables live.
+<!--/auto:scoring_table-->
+
+<!--auto:scoring_compare-->
+
+| Model + market compared with... (log loss per fight; negative means it is better) | Fights | Average | 95% range | Verdict |
+|---|---|---|---|---|
+| The opening line | 5,279 | -0.0065 | -0.0093 to -0.0036 | clearly better |
+| The model alone | 5,279 | -0.0315 | -0.0389 to -0.0241 | clearly better |
+| The opening line, where both fighters have 3+ UFC fights | 2,731 | -0.0088 | -0.0128 to -0.0048 | clearly better |
+| The opening line, where a fighter has 1 to 2 | 1,466 | -0.0038 | -0.0095 to +0.0018 | cannot be told apart |
+| The opening line, where a fighter is a debutant | 1,082 | -0.0041 | -0.0095 to +0.0014 | cannot be told apart |
+
+<!--/auto:scoring_compare-->
+
+The blend beats the opening line by a small but statistically clear amount (first row of the second table), and the edge comes from fights where both fighters have a UFC history. For debutants and thin histories the blend and the line cannot be told apart, so there the market is doing the work. Two caveats: this is against the *opening* line, which is less sharp than the closing line, and a gap this small would take roughly <!--n:n_live_needed-->2,100<!--/n--> live fights to confirm, so the backtest is the evidence and the live record is for transparency. Every number and table in this section and the one above is generated from the database by `python pipeline/readme_numbers.py update`, and the Track record page shows the same tables live.
 
 ![Scoring the probabilities on the live Track record page](docs/images/scoring.png)
 
@@ -88,7 +127,7 @@ The most useful part of this project was catching results that looked good and w
 |---|---|---|
 | **v1** | Logistic regression on rolling differences, only for fights where both fighters had 3+ UFC fights | 67.2% on a 516-fight test window (about 63 to 71%); 62.8% walk-forward over 2,740 fights. The recent window was a good stretch; the long-run figure is the honest one |
 | **v2** | Trained on every earlier fight, small-sample shrinkage (thin stats are pulled toward the average), Elo rating and strength of opposition, age and layoff curves. A pick for every fight | 61.4% against 60.3% for v1 over 6,276 fights (2014 to 2026), with better-calibrated probabilities and picks for debutants |
-| **v3** | v2 plus the betting market, combined with a small stacker trained only on earlier fights | 65.4%, as above |
+| **v3** | v2 plus the betting market, combined with a small stacker trained only on earlier fights | <!--n:acc_v3-->65.4%<!--/n-->, as above |
 
 **Ideas I tested and rejected** (each with the same year-by-year validation): gradient boosting (60.6% against 61.4%, worse), fighter-style matchup features and momentum features (61.1 to 61.4%, no gain), weight-class interactions and different Elo speeds (no change), recalibrating the probabilities (already honest), and tuning regularisation (+0.3 points, borderline). With this data the algorithm is at its ceiling. The one thing that moved the number was new information: the betting market.
 
@@ -134,13 +173,13 @@ An unattended job that writes to a database needs guardrails, so these are delib
 - **A card that suddenly shrinks is refused**, because that is more likely a parsing problem than real.
 - **Locked picks never change, and anyone can check.** A pick is made before its event and the lock is enforced in code. Each day's new picks are also committed to a public log, so the repository history shows when each was made; `python pipeline/pick_log.py verify` reads that history and reports how many picks were committed before their event. The job also compares every logged pick with the database each run and raises an alert if one differs. [What the log does and does not prove](picks_log/ABOUT.md).
 - **Dry-run first.** Every step can run in a mode that reports and writes nothing.
-- **Offline tests run before every scheduled job**, so a broken page reader stops the job before it writes anything. There are 48, covering name matching, page parsing, the betting-line maths, that reasons add up to picks, the scoring maths, the pick log and the Discord digest.
+- **Offline tests run before every scheduled job**, so a broken page reader stops the job before it writes anything. There are <!--n:n_tests-->59<!--/n-->, covering name matching, page parsing, the betting-line maths, that reasons add up to picks, the scoring maths, the pick log and the Discord digest.
 - **Least privilege.** The public app connects with a read-only database user, I confirmed writes are refused, and the private odds table is hidden even from that user. The owner connection string lives only in GitHub's encrypted secrets, and the public app holds only the read-only one.
 - **Anything that needs a person ends the run with a non-zero exit code**, so GitHub emails me.
 
 ## First live test
 
-UFC 333 (October 24, 2026) was the first card whose picks were locked before the event: 14 model-only and 14 market-informed. The model-only picks went **8 of 14** and the market-informed picks **8 of 14**, each about what its own stated confidences predicted (8.5 right). The final betting line's favourites went 11 of 14 on a card of mostly near-even fights. Fourteen fights cannot separate any of these (a coin flip gets 8 or more of 14 about 40% of the time, and telling a 62% model from a coin flip takes roughly 130 fights), so the record is built over many cards. It is on the app's **Track record** page. This card's picks were locked in the database before the event but were published to the public pick log afterwards, so the log's independent timestamps start with the cards that followed.
+UFC 333 (October 24, 2026) was the first card whose picks were locked before the event: <!--n:u333_n-->14<!--/n--> model-only and <!--n:u333_n-->14<!--/n--> market-informed. The model-only picks went **<!--n:u333_v2-->8<!--/n--> of <!--n:u333_n-->14<!--/n-->** (its own stated confidences predicted <!--n:u333_expected_v2-->8.5<!--/n-->) and the market-informed picks **<!--n:u333_v3-->8<!--/n--> of <!--n:u333_n-->14<!--/n-->** (<!--n:u333_expected_v3-->8.5<!--/n-->). The final betting line's favourites went 11 of 14 on a card of mostly near-even fights. Fourteen fights cannot separate any of these (a coin flip gets 8 or more of 14 about 40% of the time, and telling a 62% model from a coin flip takes roughly 130 fights), so the record is built over many cards. It is on the app's **Track record** page. This card's picks were locked in the database before the event but were published to the public pick log afterwards, so the log's independent timestamps start with the cards that followed.
 
 ## Limitations
 

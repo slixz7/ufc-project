@@ -5,7 +5,8 @@ name: Auto update
 #   Daily run  : only happens once you set the repository VARIABLE  AUTO_ENABLED = true
 # Secrets (Settings > Secrets and variables > Actions): DATABASE_URL (owner string), ODDS_API_KEY, KAGGLE_API_TOKEN,
 #   DISCORD_WEBHOOK_URL (optional: posts new picks and results to a Discord channel)
-# After each real run the job commits picks_log/locked_picks.csv, a public time-stamped record of every locked pick.
+# After each real run the job commits picks_log/locked_picks.csv (a public time-stamped record of every locked pick) and, on Mondays,
+# README.md when its generated numbers changed. It never commits anything else.
 on:
   schedule:
     - cron: "17 14 * * *"          # every day at 14:17 UTC
@@ -17,7 +18,7 @@ on:
         default: true
 
 permissions:
-  contents: write            # only so the job can commit picks_log/ (the public pick log); it never touches any other file
+  contents: write            # only so the job can commit picks_log/ and README.md; it never touches any other file
 
 concurrency:
   group: auto-update
@@ -52,16 +53,17 @@ jobs:
           DRY: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && '--dry-run' || '' }}
         run: python pipeline/auto_update.py all $DRY
 
-      - name: Publish the pick log (a public, time-stamped record of every locked pick)
+      - name: Publish the pick log and any refreshed README numbers
         if: ${{ always() && (github.event_name == 'schedule' || inputs.dry_run != true) }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add picks_log
+          git add README.md
+          if [ -d picks_log ]; then git add picks_log; fi
           if git diff --cached --quiet; then
             echo "No new picks to log."
             exit 0
           fi
-          git commit -m "Log newly locked picks"
+          git commit -m "Update the pick log and README numbers"
           git pull --rebase origin main
           git push origin HEAD:main

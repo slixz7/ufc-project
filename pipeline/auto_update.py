@@ -11,6 +11,7 @@ One command runs everything in the right order (each step is separate, so one fa
     refresh-odds  (Mondays) refresh the historical odds dataset and the v3 backtest
     odds-history  (a report, not part of `all`) what the daily line snapshots have collected so far
     pick-log      append newly locked picks to picks_log/locked_picks.csv (the GitHub job commits it; locally only with --write-pick-log)
+    readme        (Mondays) refresh the generated numbers and tables in README.md from the database; the GitHub job commits the change
     digest        post newly locked picks and event results to Discord (needs DISCORD_WEBHOOK_URL), each exactly once
     discord-test  (not part of `all`) send one test message to check the webhook
 
@@ -59,6 +60,7 @@ import digest
 import model_v2
 import model_v3
 import pick_log
+import readme_numbers
 import update_from_csv
 import upcoming
 
@@ -765,6 +767,7 @@ def run(args) -> int:
         "pick-log": lambda: pick_log.step_pick_log(engine, today, rep, args.dry_run, write=pick_log.should_write(args)),
         "results": lambda: step_results(engine, today, rep, args.dry_run, workdir),
         "refresh-odds": lambda: step_refresh_odds(engine, today, rep, args.dry_run, workdir, args.command == "refresh-odds"),
+        "readme": lambda: readme_numbers.step_readme(engine, today, rep, args.dry_run, write=os.getenv("GITHUB_ACTIONS") == "true", forced=args.command == "readme"),
         "digest": lambda: digest.run_digest(engine, today, rep, args.dry_run),
     }
     chosen = list(steps) if args.command == "all" else [args.command]
@@ -791,7 +794,7 @@ def run(args) -> int:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Hands-off upkeep for the UFC Fight Predictor")
-    ap.add_argument("command", choices=["all", "cards", "v2", "odds", "lock", "pick-log", "results", "refresh-odds", "digest", "odds-history", "discord-test"])
+    ap.add_argument("command", choices=["all", "cards", "v2", "odds", "lock", "pick-log", "results", "refresh-odds", "readme", "digest", "odds-history", "discord-test"])
     ap.add_argument("--dry-run", action="store_true", help="look and report; write nothing")
     ap.add_argument("--today", help="(testing only) pretend today is YYYY-MM-DD")
     ap.add_argument("--write-pick-log", action="store_true", help="(pick-log) write the public pick log from this computer too; normally only the GitHub job does")

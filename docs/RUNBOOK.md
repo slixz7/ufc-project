@@ -16,6 +16,7 @@ This is the hands-on guide: what each piece does, the commands to run it, and th
 | **Model v2** | `pipeline/model_v2.py`, `sql/model_v2.sql` | The statistical model: a pick for every fight, past and upcoming |
 | **Model v3** | `pipeline/model_v3.py`, `sql/model_v3.sql` | v2 plus the betting market |
 | **Automation** | `pipeline/auto_update.py`, `.github/workflows/auto-update.yml` | Daily job: cards, lines, picks, results, odds history |
+| **README numbers** | `pipeline/readme_numbers.py` | Keeps every live number and table in `README.md` equal to the database |
 | **Pick log** | `pipeline/pick_log.py`, `picks_log/` | Public, time-stamped record of every locked pick, committed by the daily job |
 | **Discord digest** | `pipeline/digest.py` | Posts newly locked picks and event results to a Discord channel, once each |
 | Web app | `app/streamlit_app.py` | Read-only Streamlit app |
@@ -73,6 +74,8 @@ All database commands below need a PostgreSQL database (a free hosted one such a
    python pipeline/auto_update.py digest --dry-run            # what would be posted to Discord (needs DISCORD_WEBHOOK_URL)
    python pipeline/auto_update.py discord-test                # send one test message to check the webhook
    python pipeline/pick_log.py verify                         # in a git clone: when did each logged pick first appear in the history?
+   python pipeline/readme_numbers.py check                    # is README.md in step with the database? (any connection string works; it only reads)
+   python pipeline/readme_numbers.py update                   # rewrite the generated numbers and tables in README.md
    ```
    Exit code 0 = fine, 1 = a step failed, 3 = something needs your attention (listed at the top of the report).
 7. **Schedule it on GitHub.** Add the repository secrets `DATABASE_URL` (owner string), `ODDS_API_KEY`, `KAGGLE_API_TOKEN` and, optionally, `DISCORD_WEBHOOK_URL`, run the "Auto update" workflow once by hand (it starts as a dry run), then set the repository variable `AUTO_ENABLED` to `true`. It runs daily at 14:17 UTC and emails you when something needs attention. Note that GitHub pauses scheduled jobs in a public repo after 60 days without repository activity.
@@ -97,6 +100,10 @@ git push
 ```
 
 Only the GitHub job writes the log (your own runs skip it, so the two never collide); `pick-log --write-pick-log` forces it. To make the history harder to rewrite, protect `main` against force pushes and deletions (Settings, Rules, New branch ruleset) and leave "Require a pull request" **off**, or the job's own push is blocked.
+
+## README numbers
+
+Live numbers in `README.md` sit between markers: `<!--n:name-->65.4%<!--/n-->` for one number, and `<!--auto:name-->` ... `<!--/auto:name-->` around a table. `readme_numbers.py update` recomputes them from the database; `check` says what is stale. **Edit the prose freely, but never between the markers**, because the next update overwrites it. Numbers from one-off experiments (the leakage story, model comparisons) are plain text and are never touched. The generator also guards the claims the prose makes ("the blend beats the line", "the probabilities track the stated confidence", ...): if the data stops supporting one, `check` says `CLAIM NO LONGER HOLDS` and the daily report asks for attention. The GitHub job refreshes the file on Mondays and commits it only if something changed. To add a new generated number, add its name to `known_names()` and `compute()` in `readme_numbers.py`, then put the markers in the README.
 
 ## Discord digest
 
