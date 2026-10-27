@@ -17,6 +17,7 @@ This is the hands-on guide: what each piece does, the commands to run it, and th
 | **Model v3** | `pipeline/model_v3.py`, `sql/model_v3.sql` | v2 plus the betting market |
 | **Automation** | `pipeline/auto_update.py`, `.github/workflows/auto-update.yml` | Daily job: cards, lines, picks, results, odds history |
 | **Goes the distance** | `pipeline/model_distance.py`, `pipeline/distance_scores.py`, `app/distance_ui.py` | The chance each fight goes to a decision: backtest, locked predictions for upcoming bouts, grading, and its display |
+| **Backups** | `pipeline/backup.py`, `.github/workflows/backup.yml` | Weekly CSV backup of every table to a private repository, with a verifier and a safe restore |
 | **README numbers** | `pipeline/readme_numbers.py` | Keeps every live number and table in `README.md` equal to the database |
 | **Pick log** | `pipeline/pick_log.py`, `picks_log/` | Public, time-stamped record of every locked pick and goes-the-distance prediction (two files), committed by the daily job |
 | **Discord digest** | `pipeline/digest.py` | Posts newly locked picks and event results to a Discord channel, once each |
@@ -109,6 +110,23 @@ git push
 ```
 
 Only the GitHub job writes the log (your own runs skip it, so the two never collide); `pick-log --write-pick-log` forces it. To make the history harder to rewrite, protect `main` against force pushes and deletions (Settings, Rules, New branch ruleset) and leave "Require a pull request" **off**, or the job's own push is blocked.
+
+## Backups
+
+`.github/workflows/backup.yml` runs every Sunday (and on demand), dumps every table except the rebuildable `fight_reasons` cache to plain CSV in a stable order, checks the files against `MANIFEST.csv`, and commits them to a **private** repository named `ufc-project-backups`. A week with no new data produces identical files and no commit.
+
+One-off setup:
+
+1. Create a **private** repository `ufc-project-backups` on GitHub with **Add a README file** ticked (an empty repository cannot be checked out).
+2. Create a fine-grained token (profile photo, Settings, Developer settings, Personal access tokens, Fine-grained tokens, Generate new token): resource owner = you, repository access = **Only select repositories** and choose `ufc-project-backups`, repository permission **Contents: Read and write**, expiry up to one year. Copy it once.
+3. In this repository add the secret `BACKUP_REPO_TOKEN` (the token) and the variable `BACKUP_ENABLED` = `true`. `DATABASE_URL` is the same **owner** secret the daily job uses: the read-only user cannot read the odds history.
+4. Run **Actions, Backup, Run workflow** once and check the private repository has a `data/` folder.
+
+The token expires: put the date in your calendar. An expired token makes the weekly run fail and GitHub emails you.
+
+On your own computer: `python pipeline/backup.py dump` (writes to `data/backup`, which git ignores), `python pipeline/backup.py verify data/backup` (needs no database).
+
+To restore: clone `ufc-project-backups`, create the empty tables with the project's setup commands (`model_v2.py setup`, `model_v3.py setup`, `model_distance.py setup`; the odds history table is created by the odds step's first real run, or by `python -c "import sys; sys.path.insert(0, 'pipeline'); import auto_update, model_v2; auto_update.ensure_snapshot_tables(model_v2.make_engine())"`), then run `python pipeline/backup.py restore PATH_TO_CLONE/data --table odds_snapshots` for each table you need. Restore only loads into an empty table, refuses a damaged file, and never deletes. Tables that can be rebuilt (`fights`, the backtests, the reasons) are quicker to rebuild with their own commands. A blank cell comes back as NULL.
 
 ## Goes the distance
 

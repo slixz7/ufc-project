@@ -1027,3 +1027,94 @@ def test_the_verifier_reads_the_distance_history_too(tmp_path):
     report = pick_log.verify_report(tmp_path, pick_log.DIST_REL, ("bout_id",), "goes-the-distance predictions")
     assert "1 of 2 logged goes-the-distance predictions were first committed before their event date" in report
     assert pick_log.verify_report(tmp_path / "nowhere", pick_log.DIST_REL, ("bout_id",), "goes-the-distance predictions").startswith("No goes-the-distance predictions")
+
+
+# ---------------------------------------------------------------------------------------------- backups
+import backup  # noqa: E402
+
+
+def _backup_db(path, with_rows=True):
+    import sqlalchemy as sa
+    eng = sa.create_engine(f"sqlite:///{path}")
+    with eng.begin() as c:
+        c.exec_driver_sql("CREATE TABLE picks (id INTEGER PRIMARY KEY, name TEXT, p REAL, when_d TEXT, note TEXT)")
+        c.exec_driver_sql("CREATE TABLE no_key (a TEXT, b INTEGER, c REAL)")
+        c.exec_driver_sql("CREATE TABLE fight_reasons (fight_url TEXT, reasons TEXT)")
+        if with_rows:
+            c.exec_driver_sql("INSERT INTO picks VALUES (3, 'Carlos \"El\" Diaz', 0.1, '2026-10-31', NULL), (1, 'O''Brien, Jr.', 0.5, NULL, 'a,b'), (2, 'two\nlines', 0.3333333333333333, '2026-11-07', 'x')")
+            c.exec_driver_sql("INSERT INTO no_key VALUES ('z', 2, 1.5), ('a', 9, NULL), ('a', 1, 2.5)")
+            c.exec_driver_sql("INSERT INTO fight_reasons VALUES ('f1', '{\"big\": true}')")
+    return eng
+
+
+def test_a_dump_is_complete_sorted_and_leaves_out_the_rebuildable_table(tmp_path):
+    eng = _backup_db(tmp_path / "a.db")
+    manifest = backup.dump(eng, tmp_path / "out")
+    assert sorted(x["table"] for x in manifest) == ["no_key", "picks"] and not (tmp_path / "out" / "fight_reasons.csv").exists()
+    picks = pd.read_csv(tmp_path / "out" / "picks.csv", dtype=str, keep_default_na=False)
+    assert picks.id.tolist() == ["1", "2", "3"]                                                          # sorted by the primary key, not by insertion order
+    assert picks.name.tolist() == ["O'Brien, Jr.", "two\nlines", 'Carlos "El" Diaz']                      # commas, quotes and a newline survive
+    assert pd.read_csv(tmp_path / "out" / "no_key.csv", dtype=str, keep_default_na=False).a.tolist() == ["a", "a", "z"]   # no key: ordered by its first columns
+    assert {x["table"]: x["rows"] for x in manifest} == {"picks": 3, "no_key": 3} and backup.verify(tmp_path / "out") == []
+
+
+def test_dumping_twice_gives_identical_files_so_a_quiet_week_makes_no_commit(tmp_path):
+    eng = _backup_db(tmp_path / "a.db")
+    backup.dump(eng, tmp_path / "one")
+    backup.dump(eng, tmp_path / "two")
+    for f in ("picks.csv", "no_key.csv", backup.MANIFEST):
+        assert (tmp_path / "one" / f).read_bytes() == (tmp_path / "two" / f).read_bytes()
+
+
+def test_verify_catches_every_kind_of_damage(tmp_path):
+    eng = _backup_db(tmp_path / "a.db")
+    out = tmp_path / "out"
+    backup.dump(eng, out)
+    assert backup.verify(out) == []
+    with open(out / "picks.csv", "a", encoding="utf-8", newline="") as fh:
+        fh.write("4,sneaked in,0.9,,\n")
+    assert any("picks" in p and "does not match" in p for p in backup.verify(out))                          # a changed file
+    (out / "no_key.csv").unlink()
+    assert any("no_key" in p and "missing" in p for p in backup.verify(out))                                 # a missing file
+    (out / "stray.csv").write_text("a\n1\n", encoding="utf-8")
+    assert any("stray.csv" in p and "not listed" in p for p in backup.verify(out))                           # a file nobody vouches for
+    (out / backup.MANIFEST).unlink()
+    assert backup.verify(out) == [f"{backup.MANIFEST} is missing"]
+
+
+def test_a_restore_reproduces_the_table_and_refuses_everything_unsafe(tmp_path):
+    import sqlalchemy as sa
+    src = _backup_db(tmp_path / "a.db")
+    out = tmp_path / "out"
+    backup.dump(src, out)
+    dst = _backup_db(tmp_path / "b.db", with_rows=False)                                                     # the empty tables a setup command would create
+    assert backup.restore_table(dst, out, "picks") == 3
+    a = pd.read_sql(sa.text("SELECT * FROM picks ORDER BY id"), src)
+    b = pd.read_sql(sa.text("SELECT * FROM picks ORDER BY id"), dst)
+    assert b.id.astype(int).tolist() == a.id.tolist() and b.name.tolist() == a.name.tolist() and b.when_d.isna().tolist() == a.when_d.isna().tolist()   # NULLs stay NULL
+    assert np.allclose(b.p.astype(float), a.p)                                                                # floats come back exactly
+    with pytest.raises(ValueError, match="already has rows"):
+        backup.restore_table(dst, out, "picks")                                                               # never merges into existing data
+    with pytest.raises(ValueError, match="no backup file"):
+        backup.restore_table(dst, out, "fight_reasons")
+    with pytest.raises(ValueError, match="does not exist"):
+        (out / "ghost.csv").write_text("a\n1\n", encoding="utf-8")
+        backup.restore_table(dst, out, "ghost")
+    backup.dump(src, out)                                                                                    # refresh the manifest, then damage a file
+    with open(out / "no_key.csv", "a", encoding="utf-8", newline="") as fh:
+        fh.write("q,1,1\n")
+    with pytest.raises(ValueError, match="refusing to restore"):
+        backup.restore_table(dst, out, "no_key")                                                              # a damaged backup is never loaded
+    backup.dump(src, out)
+    narrow = sa.create_engine(f"sqlite:///{tmp_path / 'c.db'}")
+    with narrow.begin() as c:
+        c.exec_driver_sql("CREATE TABLE picks (id INTEGER PRIMARY KEY, name TEXT)")                           # a table that lacks columns the backup has
+    with pytest.raises(ValueError, match="columns the table does not"):
+        backup.restore_table(narrow, out, "picks")
+
+
+def test_json_cells_are_written_with_sorted_keys_and_missing_values_as_blank():
+    df = pd.DataFrame({"j": [{"b": 1, "a": [2, 1]}, None], "n": [1.5, np.nan]})
+    out = backup.format_frame(df)
+    assert out.j[0] == '{"a":[2,1],"b":1}' and pd.isna(out.j[1])
+    assert out.to_csv(index=False, lineterminator="\n", na_rep="").splitlines() == ["j,n", '"{""a"":[2,1],""b"":1}",1.5', ",".join(["", ""])]

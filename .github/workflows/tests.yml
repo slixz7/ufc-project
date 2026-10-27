@@ -1,0 +1,39 @@
+name: Tests
+
+# Runs the offline tests and a static check on every push and pull request. It needs no secrets and cannot touch the database:
+# the tests use throwaway in-memory databases. (The daily "Auto update" job runs the same tests before it writes anything.)
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pipeline/requirements.txt
+
+      - name: Install packages
+        run: |
+          pip install -r pipeline/requirements.txt
+          pip install pyflakes
+
+      - name: Static check (undefined names and unused imports, including in the web app that the tests cannot run)
+        run: python -m pyflakes app pipeline tests
+
+      - name: Offline tests
+        run: python -m pytest -q tests

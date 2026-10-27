@@ -1,0 +1,73 @@
+name: Backup
+
+# Weekly backup of the whole database (every table except the rebuildable reasons cache) to a PRIVATE repository, as plain CSV.
+# Secrets: DATABASE_URL (the OWNER string: the odds history is hidden from the read-only user) and BACKUP_REPO_TOKEN (a fine-grained
+# token that can write to the backup repository and nothing else). Variable: BACKUP_ENABLED = true switches the weekly schedule on.
+# One-off setup and how to restore: docs/RUNBOOK.md.
+on:
+  schedule:
+    - cron: "47 6 * * 0"            # Sundays at 06:47 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backup
+  cancel-in-progress: false
+
+jobs:
+  backup:
+    if: github.event_name == 'workflow_dispatch' || vars.BACKUP_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pipeline/requirements.txt
+
+      - name: Install packages
+        run: pip install -r pipeline/requirements.txt
+
+      - name: Check both secrets are set
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          BACKUP_REPO_TOKEN: ${{ secrets.BACKUP_REPO_TOKEN }}
+        run: |
+          [ -n "$DATABASE_URL" ] || { echo "The DATABASE_URL secret is not set."; exit 1; }
+          [ -n "$BACKUP_REPO_TOKEN" ] || { echo "The BACKUP_REPO_TOKEN secret is not set."; exit 1; }
+
+      - name: Dump the database
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python pipeline/backup.py dump --out backup_out
+
+      - name: Check the dump is intact
+        run: python pipeline/backup.py verify backup_out
+
+      - name: Check out the private backup repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/ufc-project-backups
+          token: ${{ secrets.BACKUP_REPO_TOKEN }}
+          path: backups
+
+      - name: Save the backup (only if something changed)
+        run: |
+          rm -rf backups/data
+          mkdir -p backups/data
+          cp backup_out/* backups/data/
+          cd backups
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "Nothing has changed since the last backup."
+            exit 0
+          fi
+          git commit -m "Backup $(date -u +%Y-%m-%d)"
+          git push

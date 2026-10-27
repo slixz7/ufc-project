@@ -29,7 +29,6 @@ import argparse
 import logging
 import os
 import sys
-from datetime import date
 from pathlib import Path
 
 import numpy as np
