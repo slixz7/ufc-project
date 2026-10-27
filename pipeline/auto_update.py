@@ -10,6 +10,9 @@ One command runs everything in the right order (each step is separate, so one fa
     results       download the latest results, add them, grade locked picks, score new fights
     refresh-odds  (Mondays) refresh the historical odds dataset and the v3 backtest
     odds-history  (a report, not part of `all`) what the daily line snapshots have collected so far
+    pick-log      append newly locked picks to picks_log/locked_picks.csv (the GitHub job commits it; locally only with --write-pick-log)
+    digest        post newly locked picks and event results to Discord (needs DISCORD_WEBHOOK_URL), each exactly once
+    discord-test  (not part of `all`) send one test message to check the webhook
 
     python pipeline/auto_update.py all --dry-run        # look, change nothing (do this first)
     python pipeline/auto_update.py all                  # the real thing (this is what the scheduled job runs)
@@ -52,8 +55,10 @@ import requests
 import sqlalchemy as sa
 from bs4 import BeautifulSoup
 
+import digest
 import model_v2
 import model_v3
+import pick_log
 import update_from_csv
 import upcoming
 
@@ -757,8 +762,10 @@ def run(args) -> int:
         "v2": lambda: step_v2(engine, today, rep, args.dry_run),
         "odds": lambda: step_odds(engine, today, rep, args.dry_run, save_raw, show=args.show),
         "lock": lambda: step_lock(engine, today, rep, args.dry_run, args.lock_days),
+        "pick-log": lambda: pick_log.step_pick_log(engine, today, rep, args.dry_run, write=pick_log.should_write(args)),
         "results": lambda: step_results(engine, today, rep, args.dry_run, workdir),
         "refresh-odds": lambda: step_refresh_odds(engine, today, rep, args.dry_run, workdir, args.command == "refresh-odds"),
+        "digest": lambda: digest.run_digest(engine, today, rep, args.dry_run),
     }
     chosen = list(steps) if args.command == "all" else [args.command]
     for name in chosen:
@@ -784,9 +791,10 @@ def run(args) -> int:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Hands-off upkeep for the UFC Fight Predictor")
-    ap.add_argument("command", choices=["all", "cards", "v2", "odds", "lock", "results", "refresh-odds", "odds-history"])
+    ap.add_argument("command", choices=["all", "cards", "v2", "odds", "lock", "pick-log", "results", "refresh-odds", "digest", "odds-history", "discord-test"])
     ap.add_argument("--dry-run", action="store_true", help="look and report; write nothing")
     ap.add_argument("--today", help="(testing only) pretend today is YYYY-MM-DD")
+    ap.add_argument("--write-pick-log", action="store_true", help="(pick-log) write the public pick log from this computer too; normally only the GitHub job does")
     ap.add_argument("--horizon", type=int, default=HORIZON_DAYS, help="how many days ahead to look for announced events")
     ap.add_argument("--lock-days", type=int, default=LOCK_DAYS, help="lock market-informed picks this many days before an event")
     ap.add_argument("--show", action="store_true", help="(cards) list every bout it read and how each name was matched; (odds) list each matched line and the ignored ones")
@@ -796,6 +804,8 @@ def main(argv=None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     if args.command == "odds-history":
         return odds_history(model_v2.make_engine())
+    if args.command == "discord-test":
+        return digest.discord_test()
     return run(args)
 
 

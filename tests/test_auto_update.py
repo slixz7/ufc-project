@@ -379,3 +379,142 @@ def test_a_line_with_the_family_name_first_and_a_one_letter_spelling_difference_
     assert bout.bout_id == "b1" and home_is_a is True
     # and it is therefore not reported as a card problem
     assert au.match_line_to_bout("Julian Erosa", "Jeongyoung Lee", date(2026, 11, 1), saved) is not None
+
+
+# ---------------------------------------------------------------------------------------------- scoring the probabilities
+def _scored(rows):
+    return pd.DataFrame(rows, columns=["fighter_a", "actual_winner", "p_v2_a", "market_prob_a", "p_a_wins", "tier"])
+
+
+def test_log_loss_and_brier_match_hand_calculations():
+    d = _scored([("A", "A", 0.8, 0.7, 0.9, "full"), ("A", "B", 0.3, 0.4, 0.2, "full")])
+    r = model_v3.probability_scores(d)
+    assert abs(r["scores"]["v2"]["log_loss"] - (-(np.log(0.8) + np.log(0.7)) / 2)) < 1e-9
+    assert abs(r["scores"]["v2"]["brier"] - ((0.2 ** 2) + (0.3 ** 2)) / 2) < 1e-9
+    assert abs(r["scores"]["coin"]["log_loss"] - np.log(2)) < 1e-9 and r["scores"]["coin"]["brier"] == 0.25
+
+
+def test_the_verdict_says_clearly_better_only_when_the_interval_excludes_zero():
+    rng = np.random.default_rng(1)
+    n = 2000
+    p = rng.uniform(0.3, 0.7, n)
+    y = (rng.uniform(size=n) < p)
+    d = pd.DataFrame({"fighter_a": "A", "actual_winner": np.where(y, "A", "B"), "p_v2_a": 0.5, "market_prob_a": np.clip(p + rng.normal(0, 0.08, n), 0.05, 0.95),
+                      "p_a_wins": p, "tier": "full"})                              # the "blend" is the true probability: it must beat a noisy line
+    r = model_v3.probability_scores(d)
+    assert r["blend_vs_line"]["verdict"] == "clearly better" and r["blend_vs_line"]["hi"] < 0
+    same = d.assign(p_a_wins=d.market_prob_a)                                      # identical predictions: no difference to find
+    assert model_v3.probability_scores(same)["blend_vs_line"]["mean"] == 0
+
+
+# ---------------------------------------------------------------------------------------------- the public pick log
+import subprocess  # noqa: E402
+import pick_log  # noqa: E402
+
+
+def _picks(rows):
+    return pd.DataFrame(rows, columns=["pick_type", "bout_id", "event_date", "event_name", "bout_order", "fighter_a", "fighter_b", "predicted_winner", "p_a_wins", "locked_at_utc"])
+
+
+def test_the_log_only_ever_appends_and_never_adds_a_pick_twice(tmp_path):
+    path = tmp_path / "picks_log" / "locked_picks.csv"
+    a = _picks([("model-only", "b1", "2026-10-31", "UFC X", 1, "A One", "B Two", "A One", 0.61234, "2026-10-22T10:00:00Z")])
+    assert pick_log.append(pick_log.new_rows(a, pick_log.read_log(path)), path) == 1
+    first = path.read_text(encoding="utf-8")
+    b = pd.concat([a, _picks([("market-informed", "b1", "2026-10-31", "UFC X", 1, "A One", "B Two", "B Two", 0.4, "2026-10-29T10:00:00Z")])], ignore_index=True)
+    assert pick_log.append(pick_log.new_rows(b, pick_log.read_log(path)), path) == 1       # only the new kind of pick for the same bout
+    assert path.read_text(encoding="utf-8").startswith(first)                              # what was there is untouched
+    assert pick_log.append(pick_log.new_rows(b, pick_log.read_log(path)), path) == 0        # nothing new: nothing written
+    assert path.read_text(encoding="utf-8").splitlines()[0].split(",") == pick_log.COLUMNS
+    assert "0.6123" in path.read_text(encoding="utf-8") and "odds" not in path.read_text(encoding="utf-8").lower()
+
+
+def test_a_logged_pick_that_changes_in_the_database_is_caught():
+    db = _picks([("model-only", "b1", "2026-10-31", "UFC X", 1, "A One", "B Two", "A One", 0.6123, "t")])
+    logged = db.assign(logged_at_utc="x")
+    assert pick_log.changed_rows(db, logged) == []
+    assert len(pick_log.changed_rows(db.assign(predicted_winner="B Two"), logged)) == 1        # the pick flipped
+    assert len(pick_log.changed_rows(db.assign(p_a_wins=0.70), logged)) == 1                   # the probability moved
+    assert pick_log.changed_rows(db.assign(p_a_wins=0.61234), logged.assign(p_a_wins="0.6123")) == []   # rounding to 4 decimals is not a change
+
+
+def test_the_verifier_reads_when_each_pick_first_appeared_in_git_history(tmp_path):
+    import os
+    def git(*a, when=None):
+        env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t", GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
+        if when:
+            env["GIT_COMMITTER_DATE"] = env["GIT_AUTHOR_DATE"] = when
+        subprocess.run(["git", *a], cwd=tmp_path, env=env, check=True, capture_output=True)
+    git("init", "-q")
+    log = tmp_path / "picks_log" / "locked_picks.csv"
+    early = _picks([("model-only", "b1", "2026-10-31", "UFC X", 1, "A One", "B Two", "A One", 0.6, "2026-10-22T10:00:00Z")])
+    late = _picks([("model-only", "b2", "2026-10-24", "UFC Y", 1, "C Three", "D Four", "C Three", 0.55, "2026-10-20T10:00:00Z")])
+    pick_log.append(early.assign(), log, now=pd.Timestamp("2026-10-22T11:00:00Z").to_pydatetime())
+    git("add", "."); git("commit", "-qm", "1", when="2026-10-22T11:00:00+00:00")                 # committed a week BEFORE its event
+    pick_log.append(late, log, now=pd.Timestamp("2026-10-25T09:00:00Z").to_pydatetime())
+    git("add", "."); git("commit", "-qm", "2", when="2026-10-25T09:00:00+00:00")                 # committed AFTER its event
+    seen = pick_log.first_seen(tmp_path)
+    assert seen[("model-only", "b1")][1].startswith("2026-10-22") and seen[("model-only", "b2")][1].startswith("2026-10-25")
+    report = pick_log.verify_report(tmp_path)
+    assert "1 of 2 logged picks were first committed before their event date" in report
+    assert pick_log.verify_report(tmp_path / "nowhere").startswith("No picks")
+
+
+# ---------------------------------------------------------------------------------------------- the Discord digest
+import digest  # noqa: E402
+
+
+def test_long_announcements_are_split_without_cutting_a_line():
+    lines = [f"• Fighter {i} {60 + i % 20}% over Opponent {i}" for i in range(300)]
+    parts = digest.chunk(lines)
+    assert len(parts) > 1 and all(len(p) <= digest.LIMIT for p in parts)
+    assert [ln for p in parts for ln in p.splitlines()] == lines
+
+
+def test_the_locked_picks_message_notes_where_the_market_changed_the_pick():
+    picks = pd.DataFrame({"bout_id": ["b1", "b2"], "bout_order": [1, 2], "fighter_a": ["A One", "C Three"], "fighter_b": ["B Two", "D Four"],
+                          "predicted_winner": ["B Two", "C Three"], "confidence": [0.55, 0.7]})
+    model_only = picks.assign(predicted_winner=["A One", "C Three"])
+    text = "\n".join(digest.locked_messages("2026-10-31", "UFC X", "market-informed", picks, model_only))
+    lines = text.splitlines()
+    assert "• B Two 55% over A One (model-only said A One)" in lines            # the market flipped this one
+    assert "• C Three 70% over D Four" in lines                                  # this one agrees with model-only: no note
+    assert "UFC X" in text and "Not betting advice" in text and "odds" not in text.lower().replace("not betting advice", "")
+
+
+def test_the_results_message_counts_both_kinds_of_pick():
+    v2 = pd.DataFrame({"bout_id": ["b1", "b2"], "bout_order": [1, 2], "fighter_a": ["A One", "C Three"], "fighter_b": ["B Two", "D Four"],
+                       "actual_winner": ["B Two", "C Three"], "correct": [False, True]})
+    v3 = pd.DataFrame({"bout_id": ["b1"], "correct": [True]})
+    text = "\n".join(digest.results_messages("2026-10-24", "UFC Y", v2, v3))
+    assert "Model-only picks: 1 of 2 right (50%)" in text and "Market-informed picks: 1 of 1 right (100%)" in text
+    assert "❌ ✅  B Two def. A One" in text and "✅ ➖  C Three def. D Four" in text and "2 fights cannot say" in text
+
+
+def test_the_webhook_address_is_checked_and_never_leaks_through_an_error():
+    assert digest.valid_webhook("https://discord.com/api/webhooks/123456789/abcDEF")
+    assert not digest.valid_webhook("https://evil.example.com/api/webhooks/123456789/abc")
+    assert not digest.valid_webhook("")
+
+    class Boom:
+        def post(self, *a, **k):
+            raise RuntimeError("Max retries exceeded with url: /api/webhooks/123456789/SECRET")
+    assert digest.post("https://discord.com/api/webhooks/123456789/SECRET", "hi", Boom()) == "RuntimeError"    # only the error's name comes back
+
+
+def test_a_rate_limited_post_waits_as_asked_and_tries_once_more():
+    class R:
+        def __init__(self, code, body=None):
+            self.status_code, self._b = code, body or {}
+        def json(self):
+            return self._b
+
+    class S:
+        def __init__(self):
+            self.n = 0
+        def post(self, *a, **k):
+            self.n += 1
+            return R(429, {"retry_after": 2}) if self.n == 1 else R(204)
+    waited = []
+    s = S()
+    assert digest.post("https://discord.com/api/webhooks/123456789/abc", "hi", s, sleep=waited.append) == 204 and waited == [2.0] and s.n == 2

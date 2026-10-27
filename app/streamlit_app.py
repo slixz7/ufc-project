@@ -18,6 +18,7 @@ import os
 from datetime import date
 
 import altair as alt
+import numpy as np
 import pandas as pd
 import sqlalchemy as sa
 import streamlit as st
@@ -383,6 +384,57 @@ def has_reasons() -> bool:
         return bool(q("SELECT to_regclass('public.pick_reasons') IS NOT NULL AS ok").ok.iloc[0])
     except Exception:
         return False
+
+
+def prob_scores(d: pd.DataFrame) -> dict:
+    """Log loss and Brier score (lower is better) with paired 95% intervals. The same maths as `model_v3.py scoring`."""
+    y = (d.actual_winner == d.fighter_a).astype(float).to_numpy()
+    clip = lambda p: np.clip(pd.to_numeric(p).to_numpy(dtype=float), 1e-4, 1 - 1e-4)
+    P = {"coin": np.full(len(d), 0.5), "v2": clip(d.p_v2_a), "line": clip(d.market_prob_a), "v3": clip(d.p_a_wins)}
+    ll = {k: -(y * np.log(p) + (1 - y) * np.log(1 - p)) for k, p in P.items()}
+    br = {k: (p - y) ** 2 for k, p in P.items()}
+
+    def paired(a: str, b: str, mask=None) -> dict:
+        diff = ll[a] - ll[b]
+        diff = diff if mask is None else diff[mask]
+        n, m = len(diff), float(diff.mean())
+        se = float(diff.std(ddof=1) / np.sqrt(n))
+        lo, hi = m - 1.96 * se, m + 1.96 * se
+        return {"n": n, "mean": m, "lo": lo, "hi": hi, "sd": se * np.sqrt(n),
+                "verdict": "clearly better" if hi < 0 else ("clearly worse" if lo > 0 else "cannot be told apart")}
+    tiers = d.tier.to_numpy()
+    return {"n": len(d), "scores": {k: (float(ll[k].mean()), float(br[k].mean())) for k in P}, "vs_line": paired("v3", "line"),
+            "vs_model": paired("v3", "v2"), "tiers": {t: paired("v3", "line", tiers == t) for t in ("full", "limited", "debut") if (tiers == t).any()}}
+
+
+def scoring_html(r: dict) -> str:
+    labels = [("coin", "Coin flip"), ("v2", "Model-only (v2)"), ("line", "Opening line alone"), ("v3", "Model + market (v3)")]
+    best = min(r["scores"][k][0] for k, _ in labels if k != "coin")
+    rows = ""
+    for k, label in labels:
+        ll_, br_ = r["scores"][k]
+        cell = (lambda t: f"<b>{t}</b>") if (k != "coin" and ll_ == best) else (lambda t: t)
+        rows += f'<tr><td>{label}</td><td class="mono">{cell(f"{ll_:.4f}")}</td><td class="mono">{cell(f"{br_:.4f}")}</td></tr>'
+    tn = {"full": "both fighters have 3+ UFC fights", "limited": "a fighter has 1-2", "debut": "a fighter is a debut"}
+    one = lambda label, x: (f'<tr><td>{label}</td><td class="mono">{x["n"]:,}</td><td class="mono">{x["mean"]:+.4f}</td>'
+                            f'<td class="mono">{x["lo"]:+.4f} to {x["hi"]:+.4f}</td><td>{x["verdict"]}</td></tr>')
+    diffs = one("Model + market vs. opening line", r["vs_line"]) + one("Model + market vs. model-only", r["vs_model"])
+    diffs += "".join(one(f"&nbsp;&nbsp;vs. line, {tn[t]}", x) for t, x in r["tiers"].items())
+    vl = r["vs_line"]
+    need = ""
+    if vl["mean"] < 0 and vl["sd"] > 0:
+        n = int(round(((1.96 + 0.84) * vl["sd"] / abs(vl["mean"])) ** 2, -2))
+        need = (f" A gap this small would take roughly {n:,} live fights to confirm, which is years of cards, so this backtest is the evidence and the "
+                "locked record above is for transparency.")
+    return ('<div class="sect"><h3>Scoring the probabilities, not just the winners</h3></div>'
+            '<div class="aside" style="margin-top:0">Accuracy only counts whether the favourite won. These scores judge the probability itself, so a 90% pick '
+            'that loses costs far more than a 55% pick that loses. Lower is better, and a coin flip scores 0.693 on log loss.</div>'
+            f'<table class="hist"><tr><th>Predictor</th><th>Log loss</th><th>Brier score</th></tr>{rows}</table>'
+            '<div class="note" style="margin-top:14px">How much better is the blend? Negative numbers mean the first predictor is better; the range is a 95% interval.</div>'
+            f'<table class="hist"><tr><th>Comparison</th><th>Fights</th><th>Average per fight</th><th>95% range</th><th>Verdict</th></tr>{diffs}</table>'
+            '<div class="note">The blend’s edge over the line is small but statistically clear, and it comes from fights where both fighters have a UFC history. '
+            'For debutants and thin histories the two cannot be told apart, so there the market is doing the work. The comparison uses the opening line, which '
+            f'is less sharp than the closing line.{need} Not betting advice.</div>')
 
 
 def has_fight_reasons() -> bool:
@@ -898,6 +950,9 @@ def page_track():
                         'debutants. Backtest picks use each fight’s opening line; picks for upcoming cards use the line loaded when they are locked. '
                         'Betting lines: BestFightOdds, via the UFC Data set by N. Bair (CC BY 4.0, github.com/nlbair/ufc-data), built from ufcstats.com, '
                         'MMA Decisions, BestFightOdds and public ranking archives.</div>')
+            d3 = q("SELECT fighter_a, actual_winner, p_v2_a, market_prob_a, p_a_wins, tier FROM fight_picks_v3")
+            if len(d3) >= 200:
+                module_html(scoring_html(prob_scores(d3)))
 
     cb = q("SELECT confidence_bucket, fights, accuracy FROM v2_confidence_buckets ORDER BY confidence_bucket")
     cb["accuracy"] = pd.to_numeric(cb.accuracy)

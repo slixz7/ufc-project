@@ -21,6 +21,7 @@ Commands (use the OWNER database string, these write to the database)
     python pipeline/model_v3.py grade                          # copy results over once `model_v2.py grade` has run
     python pipeline/model_v3.py explain                        # store the "Why this pick?" reasons for locked picks that lack them
     python pipeline/model_v3.py explain-past                   # the same for every past fight's market-informed backtest pick
+    python pipeline/model_v3.py scoring                        # log loss and Brier score of the model, the opening line and the blend, with 95% intervals
 
 Two-stage picks: the v2 pick is locked as soon as a card is announced (model_v2.py predict). Once a line is loaded, the v3 pick
 is locked too. Neither is ever changed. The app shows v3 when it exists and v2 otherwise.
@@ -369,6 +370,54 @@ def cmd_explain(args) -> int:
     return 0
 
 
+def probability_scores(d: pd.DataFrame) -> dict:
+    """Score the probabilities, not just the winners (lower is better). `d` needs fighter_a, actual_winner, p_v2_a, market_prob_a,
+    p_a_wins and tier. Paired differences are per-fight averages with a 95% interval (normal approximation); a negative difference
+    means the first predictor is better."""
+    y = (d.actual_winner == d.fighter_a).astype(float).to_numpy()
+    clip = lambda p: np.clip(np.asarray(p, dtype=float), 1e-4, 1 - 1e-4)
+    P = {"coin": np.full(len(d), 0.5), "v2": clip(d.p_v2_a), "line": clip(d.market_prob_a), "v3": clip(d.p_a_wins)}
+    ll = {k: -(y * np.log(p) + (1 - y) * np.log(1 - p)) for k, p in P.items()}
+    br = {k: (p - y) ** 2 for k, p in P.items()}
+
+    def paired(a: str, b: str, mask=None) -> dict:
+        diff = ll[a] - ll[b]
+        if mask is not None:
+            diff = diff[mask]
+        n, m = len(diff), float(diff.mean())
+        se = float(diff.std(ddof=1) / np.sqrt(n)) if n > 1 else float("nan")
+        lo, hi = m - 1.96 * se, m + 1.96 * se
+        return {"n": n, "mean": m, "lo": lo, "hi": hi, "verdict": "clearly better" if hi < 0 else ("clearly worse" if lo > 0 else "cannot be told apart")}
+
+    tiers = d.tier.to_numpy() if "tier" in d else np.array([])
+    return {"n": len(d), "scores": {k: {"log_loss": float(ll[k].mean()), "brier": float(br[k].mean())} for k in P},
+            "blend_vs_line": paired("v3", "line"), "blend_vs_model": paired("v3", "v2"), "line_vs_model": paired("line", "v2"),
+            "tiers": {t: paired("v3", "line", tiers == t) for t in ("full", "limited", "debut") if (tiers == t).any()}}
+
+
+def cmd_scoring(args) -> int:
+    engine = v2.make_engine()
+    d = pd.read_sql(sa.text("SELECT fighter_a, actual_winner, p_v2_a, market_prob_a, p_a_wins, tier FROM fight_picks_v3"), engine)
+    if d.empty:
+        log.error("No market-informed backtest yet. Run: python pipeline/model_v3.py backtest")
+        return 2
+    r = probability_scores(d)
+    names = {"coin": "Coin flip", "v2": "Statistical model alone (v2)", "line": "Bookmakers' opening line alone", "v3": "Model + market (v3)"}
+    print(f"\n{r['n']:,} fights with an opening line, each predicted from earlier fights only. Lower is better.\n")
+    print(f"{'Predictor':32s} {'Log loss':>9s} {'Brier':>8s}")
+    for k, label in names.items():
+        print(f"{label:32s} {r['scores'][k]['log_loss']:9.4f} {r['scores'][k]['brier']:8.4f}")
+    print("\nPaired difference in log loss per fight (negative = the first is better), 95% interval:")
+    for label, key in (("Model + market vs. opening line", "blend_vs_line"), ("Model + market vs. model alone", "blend_vs_model"), ("Opening line vs. model alone", "line_vs_model")):
+        x = r[key]
+        print(f"  {label:34s} {x['mean']:+.4f}  [{x['lo']:+.4f}, {x['hi']:+.4f}]  {x['verdict']}")
+    print("\nModel + market vs. opening line, by how much history the fighters have:")
+    tn = {"full": "Both have 3+ UFC fights", "limited": "A fighter has 1 to 2", "debut": "A fighter is a debutant"}
+    for t, x in r["tiers"].items():
+        print(f"  {tn[t]:28s} {x['n']:5d} fights  {x['mean']:+.4f}  [{x['lo']:+.4f}, {x['hi']:+.4f}]  {x['verdict']}")
+    return 0
+
+
 def cmd_explain_past(args) -> int:
     """Store the 'two opinions' reasons for past market-informed picks that have none, only when they reproduce the pick."""
     engine = v2.make_engine()
@@ -431,11 +480,12 @@ def main(argv=None) -> int:
     sub.add_parser("grade")
     sub.add_parser("explain")
     sub.add_parser("explain-past")
+    sub.add_parser("scoring")
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     return {"setup": cmd_setup, "load-odds": cmd_load_odds, "backtest": cmd_backtest, "odds": cmd_odds, "predict": cmd_predict,
             "grade": cmd_grade, "explain": cmd_explain,
-            "explain-past": cmd_explain_past}[args.command](args)
+            "explain-past": cmd_explain_past, "scoring": cmd_scoring}[args.command](args)
 
 
 if __name__ == "__main__":

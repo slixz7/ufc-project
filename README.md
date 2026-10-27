@@ -16,7 +16,8 @@ A web app that predicts UFC fights **before they happen**, locks each pick with 
 | **Best result** | **65.4%** of 5,279 fights picked correctly (2016 to 2026), every pick made using only data from before that fight. A coin flip is 50% |
 | **Stack** | Python (pandas, scikit-learn), PostgreSQL on Neon, SQL window functions, Streamlit, GitHub Actions |
 | **Automation** | A daily job reads announced cards (Wikipedia), betting lines (The Odds API) and results (Kaggle) |
-| **Safety** | 37 offline tests run before every scheduled job, a dry-run mode, and a read-only database user behind the public app |
+| **Safety** | 48 offline tests run before every scheduled job, a dry-run mode, and a read-only database user behind the public app |
+| **Transparency** | Every locked pick is also published to a [public, time-stamped log](picks_log/ABOUT.md) in this repository |
 | **Cost** | Free tiers only |
 
 ## What this project is really about
@@ -48,11 +49,24 @@ The market-informed model helps most where the statistics are thinnest:
 
 **How to read this honestly**
 
-- **The market is doing most of the work.** The blend puts about 71% of its weight on the betting market and 29% on my model. The model alone is still a legitimate 61 to 62% predictor, but I would not claim to beat the bookmakers on my own.
+- **The market is doing most of the work.** The blend puts about 71% of its weight on the betting market and 29% on my model. The model alone is still a legitimate 61 to 62% predictor, but I would not claim to beat the bookmakers on my own. Scoring the probabilities (below) shows the model does add a small amount on top of the line.
 - **The probabilities are honest.** Picks stated at 80% or more were right 86.9% of the time (497 fights). The 60 to 70% bucket was a little optimistic (stated 65%, right 61.8%).
 - **The market and the model disagree on about a quarter of fights** (25.5%). In those fights the blended pick was right 57.1% of the time and the model-only pick 42.9%, which is the clearest evidence the market adds information the statistics do not have.
 - **The backtest uses opening lines.** Live picks lock two days before an event using that day's line, so I expect results between the opening-line figure above and the closing-line figure (67.0% for the line alone, 67.6% blended), not better than either.
 - **One card is noise.** A card has 10 to 14 fights, so a single event can land anywhere. The yearly accuracy of the model ranges from about 54% to 70%.
+
+### Scoring the probabilities, not just the winners
+
+Accuracy only counts whether the favourite won, which is a blunt tool: 65.4% against 64.9% cannot separate the blend from the line. Log loss and Brier score judge the probability itself, so a 90% pick that loses costs far more than a 55% pick that loses (lower is better; a coin flip scores 0.693 on log loss). Same 5,279 fights:
+
+| Predictor | Log loss | Brier score |
+|---|---|---|
+| Coin flip | 0.6931 | 0.2500 |
+| Statistical model alone (v2) | 0.6515 | 0.2298 |
+| Bookmakers' opening line alone | 0.6265 | 0.2184 |
+| **Model + market (v3)** | **0.6201** | **0.2157** |
+
+The blend beats the opening line by **0.0065 log loss per fight (95% interval 0.0036 to 0.0093)**: small, but statistically clear. It comes from fights where both fighters have a UFC history (0.0088, interval 0.0048 to 0.0128). For debutants and thin histories the blend and the line cannot be told apart, so there the market is doing the work. Two caveats: this is against the *opening* line, which is less sharp than the closing line, and a gap this small would take roughly 2,000 live fights to confirm, so the backtest is the evidence and the live record is for transparency. Every figure here comes from one command, `python pipeline/model_v3.py scoring`, and the Track record page shows the same tables live.
 
 ![The Track record page: the model, the market, and the blend by year](docs/images/track-record.png)
 
@@ -97,14 +111,16 @@ flowchart LR
     D -- read-only user --> S[Streamlit web app]
 ```
 
-The daily job (`pipeline/auto_update.py`) runs six steps, and one failing never blocks the others:
+The daily job (`pipeline/auto_update.py`) runs these steps, and one failing never blocks the others:
 
 1. **Cards:** reads the schedule and announced fight cards from Wikipedia.
 2. **Model-only picks:** locks a pick for every newly announced bout.
 3. **Betting lines:** fetches the market's line for each bout and saves a time-stamped snapshot into a private odds history.
 4. **Market-informed picks:** locks them two days before each event, using that day's line.
-5. **Results:** downloads results, grades the locked picks, and scores the new fights.
-6. **Weekly:** refreshes the historical odds dataset and extends the backtest.
+5. **Public pick log:** appends every newly locked pick to `picks_log/locked_picks.csv`; the workflow then commits it.
+6. **Results:** downloads results, grades the locked picks, and scores the new fights.
+7. **Weekly:** refreshes the historical odds dataset and extends the backtest.
+8. **Digest:** posts newly locked picks and finished events' results to a Discord channel, each exactly once.
 
 ![The daily job's report on GitHub Actions](docs/images/daily-job.png)
 
@@ -114,18 +130,15 @@ An unattended job that writes to a database needs guardrails, so these are delib
 
 - **It never guesses a name.** An unmatched or near-miss fighter name is held for human review. Only a name with no similar fighter becomes a debutant.
 - **A card that suddenly shrinks is refused**, because that is more likely a parsing problem than real.
-- **Locked picks never change.** A pick is made before its event, and the lock is enforced in code.
+- **Locked picks never change, and anyone can check.** A pick is made before its event and the lock is enforced in code. Each day's new picks are also committed to a public log, so the repository history shows when each was made; `python pipeline/pick_log.py verify` reads that history and reports how many picks were committed before their event. The job also compares every logged pick with the database each run and raises an alert if one differs. [What the log does and does not prove](picks_log/ABOUT.md).
 - **Dry-run first.** Every step can run in a mode that reports and writes nothing.
-- **Offline tests run before every scheduled job**, so a broken page reader stops the job before it writes anything. There are 37, covering name matching, page parsing, the betting-line maths, and that reasons add up to picks.
+- **Offline tests run before every scheduled job**, so a broken page reader stops the job before it writes anything. There are 48, covering name matching, page parsing, the betting-line maths, that reasons add up to picks, the scoring maths, the pick log and the Discord digest.
 - **Least privilege.** The public app connects with a read-only database user, I confirmed writes are refused, and the private odds table is hidden even from that user. The owner connection string lives only in GitHub's encrypted secrets, and the public app holds only the read-only one.
 - **Anything that needs a person ends the run with a non-zero exit code**, so GitHub emails me.
 
 ## First live test
 
-UFC 333 (October 24, 2026) is the first card whose picks were locked before the event: 14 model-only and 14 market-informed. The live record, graded as results arrive, is on the app's **Track record** page.
-
-<!-- After UFC 333 is graded, replace the paragraph above with the real result, for example:
-"UFC 333: the model-only picks went X of 14 and the market-informed picks Y of 14. A single card is a small sample." -->
+UFC 333 (October 24, 2026) was the first card whose picks were locked before the event: 14 model-only and 14 market-informed. The model-only picks went **8 of 14** and the market-informed picks **8 of 14**, each about what its own stated confidences predicted (8.5 right). The final betting line's favourites went 11 of 14 on a card of mostly near-even fights. Fourteen fights cannot separate any of these (a coin flip gets 8 or more of 14 about 40% of the time, and telling a 62% model from a coin flip takes roughly 130 fights), so the record is built over many cards. It is on the app's **Track record** page. This card's picks were locked in the database before the event but were published to the public pick log afterwards, so the log's independent timestamps start with the cards that followed.
 
 ## Limitations
 
@@ -137,6 +150,7 @@ UFC 333 (October 24, 2026) is the first card whose picks were locked before the 
 
 ## What I would do next
 
+- Retrain the blend on the line actually served (about two days out) using my own snapshots, once a few more events have accumulated.
 - Test whether my own captured lines can extend the market-informed model past the downloaded dataset.
 - Test line movement, the change between a fight's first and last line, as a signal by itself.
 - Add fighters' pre-UFC records, the best remaining fix for debutants.
