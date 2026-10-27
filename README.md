@@ -68,6 +68,8 @@ Accuracy only counts whether the favourite won, which is a blunt tool: 65.4% aga
 
 The blend beats the opening line by **0.0065 log loss per fight (95% interval 0.0036 to 0.0093)**: small, but statistically clear. It comes from fights where both fighters have a UFC history (0.0088, interval 0.0048 to 0.0128). For debutants and thin histories the blend and the line cannot be told apart, so there the market is doing the work. Two caveats: this is against the *opening* line, which is less sharp than the closing line, and a gap this small would take roughly 2,000 live fights to confirm, so the backtest is the evidence and the live record is for transparency. Every figure here comes from one command, `python pipeline/model_v3.py scoring`, and the Track record page shows the same tables live.
 
+![Scoring the probabilities on the live Track record page](docs/images/scoring.png)
+
 ![The Track record page: the model, the market, and the blend by year](docs/images/track-record.png)
 
 ## The mistakes it caught
