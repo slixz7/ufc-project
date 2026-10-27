@@ -27,7 +27,6 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 import sqlalchemy as sa
 
@@ -76,6 +75,7 @@ def load_frames(engine) -> dict:
         "v2": _read(engine, "fight_picks_v2", ["event_date", "method", "correct"]),
         "live_v2": _read(engine, "upcoming_picks_v2", ["event_name", "event_date", "status", "confidence", "correct", "graded_at"]),
         "live_v3": _read(engine, "upcoming_picks_v3", ["event_name", "event_date", "status", "confidence", "correct", "graded_at"]),
+        "dist": _read(engine, "fight_distance_v1", ["event_date", "p_distance", "p_base", "went_distance", "tier"]),
         "market_share": None,
     }
     if sa.inspect(engine).has_table("fight_reasons") and frames["v3"] is not None:
@@ -177,6 +177,35 @@ def compute(frames: dict, n_tests: int | None = None) -> Numbers:
     else:
         out.skipped.append("the market-informed backtest (fight_picks_v3) is missing or too small")
 
+    # the goes-the-distance model
+    dd = frames.get("dist")
+    if dd is not None and len(dd) >= 30:
+        import distance_scores
+        r = distance_scores.distance_scores(dd)
+        sc = r["scores"]
+
+        def drow(label: str, key: str, best: bool = False) -> str:
+            cells = [format(sc[key]["log_loss"], ".4f"), format(sc[key]["brier"], ".4f"), format(sc[key]["auc"], ".3f")]
+            if best:
+                label, cells = f"**{label}**", [f"**{x}**" for x in cells]
+            return f"| {label} | {' | '.join(cells)} |"
+        model_best = sc["model"]["log_loss"] < min(sc["recent"]["log_loss"], sc["coin"]["log_loss"]) - 1e-9      # bold only when it genuinely wins
+        b["distance_table"] = "\n".join(["| Predictor | Log loss | Brier score | AUC |", "|---|---|---|---|", drow("Coin flip", "coin"),
+                                          drow("Plain decision rate of the previous three years", "recent"), drow("Goes-the-distance model", "model", model_best)])
+        vr = r["vs_recent"]
+        v.update(dist_n=num(r["n"]), dist_first_year=str(r["first_year"]), dist_last_year=str(r["last_year"]), dist_years_better=str(r["years_better"]),
+                 dist_years_total=str(r["years_total"]), dist_gap=f"{r['max_gap'] * 100:.1f}")
+        if vr["verdict"] == "clearly better":
+            v.update(dist_gain=f"{abs(vr['mean']):.4f}", dist_gain_lo=f"{abs(vr['hi']):.4f}", dist_gain_hi=f"{abs(vr['lo']):.4f}")
+        else:
+            out.broken_claims.append("The README says the goes-the-distance model beats the plain decision rate by a clear margin, but the 95% range now includes zero.")
+        if r["max_gap"] > CAL_MAX_GAP:
+            out.broken_claims.append(f"The README says the goes-the-distance probabilities are calibrated, but one bucket is off by {r['max_gap'] * 100:.1f} points (limit {CAL_MAX_GAP * 100:.0f}).")
+        if r["years_total"] and r["years_better"] / r["years_total"] < 0.7:
+            out.broken_claims.append("The README says the goes-the-distance model beat the plain decision rate in most years, but it no longer does.")
+    else:
+        out.skipped.append("the goes-the-distance backtest (fight_distance_v1) is missing or too small")
+
     # the yearly range of the model-only backtest, over years with enough fights
     d2 = frames.get("v2")
     if d2 is not None and len(d2):
@@ -252,7 +281,8 @@ def known_names() -> set:
     """Every marker name the generator can fill (used by a test to catch typos in README.md)."""
     return {"n_fights", "first_year", "last_year", "acc_v2", "acc_line", "acc_v3", "dis_share", "dis_blend", "dis_model", "n_live_needed", "year_min_fights",
             "year_lo", "year_hi", "market_weight", "model_weight", "u333_n", "u333_v2", "u333_v3", "u333_expected_v2", "u333_expected_v3", "n_tests",
-            "results_accuracy", "results_tiers", "calibration", "scoring_table", "scoring_compare"}
+            "results_accuracy", "results_tiers", "calibration", "scoring_table", "scoring_compare", "distance_table", "dist_n", "dist_first_year", "dist_last_year",
+            "dist_gain", "dist_gain_lo", "dist_gain_hi", "dist_years_better", "dist_years_total", "dist_gap"}
 
 
 def refresh(engine, path: Path | None = None, write: bool = True, n_tests: int | None = None) -> dict:

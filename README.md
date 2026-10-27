@@ -16,9 +16,10 @@ A web app that predicts UFC fights **before they happen**, locks each pick with 
 |---|---|
 | **What it does** | Picks a winner for every UFC fight, past and upcoming, and shows the reasoning behind each pick |
 | **Best result** | **<!--n:acc_v3-->65.4%<!--/n-->** of <!--n:n_fights-->5,279<!--/n--> fights picked correctly (<!--n:first_year-->2016<!--/n--> to <!--n:last_year-->2026<!--/n-->), every pick made using only data from before that fight. A coin flip is 50% |
+| **Also predicts** | The chance each fight goes the distance, with its own honest backtest and predictions locked before the event |
 | **Stack** | Python (pandas, scikit-learn), PostgreSQL on Neon, SQL window functions, Streamlit, GitHub Actions |
 | **Automation** | A daily job reads announced cards (Wikipedia), betting lines (The Odds API) and results (Kaggle) |
-| **Safety** | <!--n:n_tests-->59<!--/n--> offline tests run before every scheduled job, a dry-run mode, and a read-only database user behind the public app |
+| **Safety** | <!--n:n_tests-->72<!--/n--> offline tests run before every scheduled job, a dry-run mode, and a read-only database user behind the public app |
 | **Transparency** | Every locked pick is also published to a [public, time-stamped log](picks_log/ABOUT.md) in this repository |
 | **Cost** | Free tiers only |
 
@@ -111,6 +112,22 @@ The blend beats the opening line by a small but statistically clear amount (firs
 
 ![The Track record page: the model, the market, and the blend by year](docs/images/track-record.png)
 
+## A second question: will the fight go the distance?
+
+Besides picking a winner, the app estimates the chance that each fight **goes to a decision**. It uses only how long these two fighters' earlier fights lasted (the share of the scheduled time they used, how often they went to a decision, how often they won or lost by a finish) and whether it is a title fight or five rounds. It was built the same honest way as the winner model: every prediction uses only earlier fights, upcoming ones are locked before the event, and the test is a walk-forward over <!--n:dist_n-->8,180<!--/n--> fights (<!--n:dist_first_year-->2006<!--/n--> to <!--n:dist_last_year-->2026<!--/n-->), each predicted by a model trained on earlier fights only. AUC is the chance that a fight that went the distance was given a higher probability than one that did not (0.5 is chance).
+
+<!--auto:distance_table-->
+
+| Predictor | Log loss | Brier score | AUC |
+|---|---|---|---|
+| Coin flip | 0.6931 | 0.2500 | 0.500 |
+| Plain decision rate of the previous three years | 0.6918 | 0.2493 | 0.512 |
+| **Goes-the-distance model** | **0.6689** | **0.2381** | **0.625** |
+
+<!--/auto:distance_table-->
+
+The model beats the plain decision rate of the previous three years by **<!--n:dist_gain-->0.0229<!--/n--> log loss per fight** (95% interval <!--n:dist_gain_lo-->0.0179<!--/n--> to <!--n:dist_gain_hi-->0.0278<!--/n-->), was better in <!--n:dist_years_better-->19<!--/n--> of <!--n:dist_years_total-->21<!--/n--> years, and its probabilities were within <!--n:dist_gap-->3.4<!--/n--> points of what happened in every large bucket. I tested richer versions (weight class, age, ratings, striking and grappling styles, gradient boosting) and none helped: the signal is how long these fighters' fights tend to last. Before trusting the result I checked it for leaks the way I did for the winner model: the counts were recomputed by brute force for 300 random fights, and a placebo with the answers shuffled drops to chance (AUC 0.500).
+
 ## The mistakes it caught
 
 The most useful part of this project was catching results that looked good and were not.
@@ -173,7 +190,7 @@ An unattended job that writes to a database needs guardrails, so these are delib
 - **A card that suddenly shrinks is refused**, because that is more likely a parsing problem than real.
 - **Locked picks never change, and anyone can check.** A pick is made before its event and the lock is enforced in code. Each day's new picks are also committed to a public log, so the repository history shows when each was made; `python pipeline/pick_log.py verify` reads that history and reports how many picks were committed before their event. The job also compares every logged pick with the database each run and raises an alert if one differs. [What the log does and does not prove](picks_log/ABOUT.md).
 - **Dry-run first.** Every step can run in a mode that reports and writes nothing.
-- **Offline tests run before every scheduled job**, so a broken page reader stops the job before it writes anything. There are <!--n:n_tests-->59<!--/n-->, covering name matching, page parsing, the betting-line maths, that reasons add up to picks, the scoring maths, the pick log and the Discord digest.
+- **Offline tests run before every scheduled job**, so a broken page reader stops the job before it writes anything. There are <!--n:n_tests-->72<!--/n-->, covering name matching, page parsing, the betting-line maths, that reasons add up to picks, the scoring maths, the pick log and the Discord digest.
 - **Least privilege.** The public app connects with a read-only database user, I confirmed writes are refused, and the private odds table is hidden even from that user. The owner connection string lives only in GitHub's encrypted secrets, and the public app holds only the read-only one.
 - **Anything that needs a person ends the run with a non-zero exit code**, so GitHub emails me.
 

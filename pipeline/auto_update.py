@@ -57,6 +57,7 @@ import sqlalchemy as sa
 from bs4 import BeautifulSoup
 
 import digest
+import model_distance
 import model_v2
 import model_v3
 import pick_log
@@ -372,14 +373,25 @@ def step_v2(engine, today: date, rep: Report, dry_run: bool) -> None:
     with engine.connect() as conn:
         n = conn.execute(sa.text("""SELECT COUNT(*) FROM upcoming_fights u LEFT JOIN upcoming_picks_v2 p USING (bout_id)
                                     WHERE u.status = 'scheduled' AND u.event_date > :t AND p.bout_id IS NULL"""), {"t": today}).scalar()
+    with engine.connect() as conn:                                      # bouts still without a goes-the-distance prediction
+        if sa.inspect(engine).has_table("upcoming_distance_v1"):
+            nd = conn.execute(sa.text("""SELECT COUNT(*) FROM upcoming_fights u LEFT JOIN upcoming_distance_v1 d ON d.bout_id = u.bout_id
+                                         WHERE u.status = 'scheduled' AND u.event_date > :t AND d.bout_id IS NULL"""), {"t": today}).scalar()
+        else:
+            nd = conn.execute(sa.text("SELECT COUNT(*) FROM upcoming_fights WHERE status = 'scheduled' AND event_date > :t"), {"t": today}).scalar()
     if dry_run:
         rep.add("Model-only picks (v2)", f"{n} newly announced bouts would get a locked model-only pick")
+        rep.add("Goes-the-distance predictions", f"{nd} bouts would get a locked prediction")
         return
     rc = model_v2.main(["predict", "--today", today.isoformat()])
     rep.add("Model-only picks (v2)", f"{n} bouts needed a pick; model_v2 predict returned {rc}")
     if rc != 0:
         raise RuntimeError(f"model_v2 predict returned {rc}")
     model_v2.main(["explain"])               # fills in any missing "Why this pick?" reasons (never blocks a pick)
+    rc2 = model_distance.main(["predict", "--today", today.isoformat()])
+    rep.add("Goes-the-distance predictions", f"{nd} bouts needed a prediction; model_distance predict returned {rc2}")
+    if rc2 != 0:
+        raise RuntimeError(f"model_distance predict returned {rc2}")
 
 
 # ----------------------------------------------------------------------------------------------
@@ -720,7 +732,9 @@ def step_results(engine, today: date, rep: Report, dry_run: bool, workdir: Path)
     if rc not in (0, None):
         raise RuntimeError(f"update_from_csv returned {rc}")
     for fn, label in ((lambda: model_v2.main(["grade"]), "grade v2"), (lambda: model_v3.main(["grade"]), "grade v3"),
-                      (lambda: model_v2.main(["backtest"]), "score new fights (v2)")):
+                      (lambda: model_v2.main(["backtest"]), "score new fights (v2)"),
+                      (lambda: model_distance.main(["grade"]), "grade goes-the-distance predictions"),
+                      (lambda: model_distance.main(["backtest"]), "score new fights (goes the distance)")):
         rc = fn()
         if rc not in (0, None):
             raise RuntimeError(f"{label} returned {rc}")

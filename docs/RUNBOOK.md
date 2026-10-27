@@ -16,6 +16,7 @@ This is the hands-on guide: what each piece does, the commands to run it, and th
 | **Model v2** | `pipeline/model_v2.py`, `sql/model_v2.sql` | The statistical model: a pick for every fight, past and upcoming |
 | **Model v3** | `pipeline/model_v3.py`, `sql/model_v3.sql` | v2 plus the betting market |
 | **Automation** | `pipeline/auto_update.py`, `.github/workflows/auto-update.yml` | Daily job: cards, lines, picks, results, odds history |
+| **Goes the distance** | `pipeline/model_distance.py`, `pipeline/distance_scores.py`, `app/distance_ui.py` | The chance each fight goes to a decision: backtest, locked predictions for upcoming bouts, grading, and its display |
 | **README numbers** | `pipeline/readme_numbers.py` | Keeps every live number and table in `README.md` equal to the database |
 | **Pick log** | `pipeline/pick_log.py`, `picks_log/` | Public, time-stamped record of every locked pick, committed by the daily job |
 | **Discord digest** | `pipeline/digest.py` | Posts newly locked picks and event results to a Discord channel, once each |
@@ -54,6 +55,14 @@ All database commands below need a PostgreSQL database (a free hosted one such a
    python pipeline/model_v3.py backtest
    python pipeline/model_v3.py explain-past
    python pipeline/model_v3.py scoring          # log loss and Brier score with 95% intervals (every figure in the README's scoring table)
+   ```
+   **Goes the distance** (owner string; the daily job then keeps it going):
+   ```
+   python pipeline/model_distance.py setup       # create its two tables
+   python pipeline/model_distance.py backtest    # score every past fight, each with a model trained on earlier fights only (about a minute)
+   python pipeline/model_distance.py predict     # lock a prediction for every announced upcoming bout
+   python pipeline/model_distance.py grade       # after the results are in the dataset
+   python pipeline/model_distance.py scoring     # the report behind the README section and the Track record page
    ```
    By hand for one card (the daily job does this for you): write `fighter_a,fighter_b,odds_a,odds_b` (American odds, names as on the card), then
    ```
@@ -100,6 +109,10 @@ git push
 ```
 
 Only the GitHub job writes the log (your own runs skip it, so the two never collide); `pick-log --write-pick-log` forces it. To make the history harder to rewrite, protect `main` against force pushes and deletions (Settings, Rules, New branch ruleset) and leave "Require a pull request" **off**, or the job's own push is blocked.
+
+## Goes the distance
+
+The model estimates the chance a fight ends in a decision from how long each fighter's earlier fights lasted (share of scheduled time used, decision rate, how often they won or lost by a finish) plus title or five rounds. Fights since 2002 with 3 or 5 scheduled rounds are used; disqualifications are left out. Scheduled rounds are not on the cards, so a title fight or main event is taken to be five rounds. Predictions are locked when a bout is announced (with the winner picks), never change, and are graded when the dataset has the result. The daily job runs `predict` in the v2 step and `grade` plus `backtest` with the results. `python pipeline/export_history.py` saves the history the models read to `data/history_export.csv` (read-only; not committed).
 
 ## README numbers
 

@@ -592,6 +592,13 @@ def _synthetic(tmp_path, claims_hold=True, seed=3, n=6000):
                                                            "graded_at": "2026-10-25 12:00:00"})
     pd.concat([mk(conf2, 8, "UFC 333: Volkanovski vs. Evloev"), mk([0.9], 0, "UFC 332: Other"), mk([0.7], 1, "UFC 333: Volkanovski vs. Evloev", "cancelled")]).to_sql("upcoming_picks_v2", eng, if_exists="append", index=False)
     mk(conf3, 8, "UFC 333: Volkanovski vs. Evloev").to_sql("upcoming_picks_v3", eng, if_exists="append", index=False)
+    import model_distance
+    model_distance.ensure_tables(eng)                                          # the goes-the-distance backtest: informative and calibrated when the claims hold
+    r2, nd = np.random.default_rng(seed + 1), 6000
+    p_d = r2.uniform(0.25, 0.75, nd)
+    pd.DataFrame({"fight_url": [f"d{i}" for i in range(nd)], "event_date": [f"{yr}-06-01" for yr in r2.integers(2006, 2027, nd)], "event_name": "x", "weight_class": "x",
+                  "scheduled_rounds": 3, "fighter_a": "a", "fighter_b": "b", "tier": r2.choice(["full", "limited", "debut"], nd), "p_distance": p_d if claims_hold else 0.5,
+                  "p_base": 0.5, "went_distance": (r2.uniform(size=nd) < p_d).astype(int), "trained_on_fights": 500}).to_sql("fight_distance_v1", eng, if_exists="append", index=False)
     with eng.begin() as c:
         c.execute(sa.text("INSERT INTO fight_reasons VALUES ('f1', 'v3', :j)"), {"j": json.dumps({"market_share": 0.71})})
     return eng, d3, conf2, conf3
@@ -617,7 +624,7 @@ def test_every_number_comes_from_the_database_with_the_stated_formatting(tmp_pat
 def test_the_tables_are_well_formed_markdown(tmp_path):
     eng, d3, *_ = _synthetic(tmp_path)
     blocks = readme_numbers.compute(readme_numbers.load_frames(eng), n_tests=1).blocks
-    assert set(blocks) == {"results_accuracy", "results_tiers", "calibration", "scoring_table", "scoring_compare"}
+    assert set(blocks) == {"results_accuracy", "results_tiers", "calibration", "scoring_table", "scoring_compare", "distance_table"}
     for name, md in blocks.items():
         rows = md.splitlines()
         assert all(r.startswith("|") and r.endswith("|") for r in rows), name
@@ -736,3 +743,211 @@ def test_the_command_line_exit_codes(tmp_path, monkeypatch, capsys):
     assert readme_numbers.main(["update"]) == 0 and path.read_text(encoding="utf-8") != _MARKED
     assert readme_numbers.main(["check"]) == 0 and "match the database" in capsys.readouterr().out   # now in step
     assert readme_numbers.main(["nonsense"]) == 2
+
+
+# ---------------------------------------------------------------------------------------------- goes-the-distance model
+import distance_scores  # noqa: E402
+import model_distance  # noqa: E402
+
+
+def _distance_db(tmp_path, n_fights=800, seed=4):
+    """A small database of fighter-fights where some fighters finish fights and others go to decisions, so the signal is learnable."""
+    import sqlalchemy as sa
+    import export_history as eh
+    rng = np.random.default_rng(seed)
+    eng = sa.create_engine(f"sqlite:///{tmp_path / 'distance.db'}")
+    nf = 90
+    fin = rng.uniform(0.1, 0.9, nf)                                     # each fighter's tendency to end fights early
+    dob = pd.Timestamp("1982-01-01") + pd.to_timedelta(rng.integers(0, 3000, nf), unit="D")
+    fights, rows = [], []
+    for i in range(n_fights):
+        a, b = rng.choice(nf, 2, replace=False)
+        when = pd.Timestamp("2004-06-01") + pd.Timedelta(days=7 * (i // 3))
+        title = bool(rng.uniform() < 0.08)
+        rounds = 5 if title else 3
+        p_dec = float(np.clip(1 - (fin[a] + fin[b]) / 2 - (0.1 if rounds == 5 else 0), 0.03, 0.97))
+        if rng.uniform() < p_dec:
+            res, fr, ft = "Decision - Unanimous", rounds, "5:00"
+        else:
+            res, fr, ft = str(rng.choice(["KO/TKO", "Submission"])), int(rng.integers(1, rounds + 1)), f"{int(rng.integers(0, 5))}:{int(rng.integers(10, 59))}"
+        winner = int(rng.integers(1, 3))
+        fights.append(dict(fight_url=f"f{i}", event_date=when.strftime("%Y-%m-%d"), event_name=f"UFC {i // 3}", weight_class="Lightweight", title_fight=int(title),
+                           num_rounds=rounds, result=res, finish_round=fr, finish_time=ft))
+        for side, f in ((1, a), (2, b)):
+            r = {c: int(rng.integers(5, 120)) for c in ("sig_land", "sig_att", "td_land", "td_att", "sub_att", "kd", "ctrl_sec", "dist_att", "clinch_att", "ground_att", "sig_absorbed", "opp_td_land", "opp_td_att")}
+            r.update(fight_url=f"f{i}", fighter_url=f"u{f}", fighter_name=f"Fighter {f}", side=side, won=int(side == winner), height_cm=175.0, reach_cm=180.0, stance="Orthodox",
+                     dob=dob[f].strftime("%Y-%m-%d"))
+            rows.append(r)
+    pd.DataFrame(fights).to_sql("fights", eng, index=False)
+    pd.DataFrame(rows)[eh.FIGHTER_COLS].to_sql("fighter_fights", eng, index=False)
+    with eng.begin() as c:
+        c.exec_driver_sql("""CREATE TABLE upcoming_fights (bout_id TEXT PRIMARY KEY, event_name TEXT, event_date DATE, bout_order INTEGER, weight_class TEXT, title_fight BOOLEAN,
+            fighter_a_name TEXT, fighter_a_url TEXT, fighter_b_name TEXT, fighter_b_url TEXT, status TEXT, loaded_at TIMESTAMP)""")
+    return eng, fin
+
+
+def test_the_distance_counts_come_only_from_earlier_fights(tmp_path):
+    eng, _ = _distance_db(tmp_path)
+    hist = model_distance.load_history(eng)
+    D = model_distance.frame(hist)
+    flagged = model_distance._flags(hist)
+    for r in D.sample(150, random_state=2).itertuples():
+        for s, url in (("a", r.url_a), ("b", r.url_b)):
+            before = flagged[(flagged.fighter_url == url) & (flagged.event_date < r.event_date) & (flagged.elig == 1)]          # brute force
+            got = [getattr(r, f"{c}_{s}") for c in model_distance.COUNT_COLS]
+            want = [len(before), before.dec.sum(), before.fin_win.sum(), before.fin_loss.sum(), before.dur_frac.sum()]
+            assert np.allclose(got, want)
+    first = D[D.n_prev_a == 0]
+    assert len(first) and (first.c_elig_a == 0).all() and (first.c_dec_a == 0).all()                                          # a first fight starts from nothing
+
+
+def test_the_backtest_finds_the_signal_without_cheating_and_never_scores_a_fight_twice(tmp_path):
+    import sqlalchemy as sa
+    eng, _ = _distance_db(tmp_path, n_fights=1600)                       # smaller samples are too noisy for anyone to learn from
+    assert model_distance.run_backtest(eng) == 0
+    d = pd.read_sql(sa.text("SELECT * FROM fight_distance_v1"), eng)
+    assert len(d) > 1000 and d.fight_url.is_unique and (d.trained_on_fights >= model_distance.MIN_TRAIN).all()
+    s = distance_scores.distance_scores(d)
+    assert s["scores"]["model"]["log_loss"] < s["scores"]["recent"]["log_loss"] and s["scores"]["model"]["auc"] > 0.58          # it learned that finishers finish
+    assert s["vs_recent"]["verdict"] == "clearly better"
+    shuffled = d.assign(went_distance=np.random.default_rng(0).permutation(d.went_distance.to_numpy()))                         # placebo: answers shuffled
+    assert abs(distance_scores.distance_scores(shuffled)["scores"]["model"]["auc"] - 0.5) < 0.07                                 # a leak-free model has no skill here
+    assert model_distance.run_backtest(eng) == 0 and len(pd.read_sql(sa.text("SELECT * FROM fight_distance_v1"), eng)) == len(d)   # nothing scored twice
+
+
+def test_a_rebuild_replaces_the_backtest_instead_of_duplicating_it(tmp_path):
+    import sqlalchemy as sa
+    eng, _ = _distance_db(tmp_path)
+    model_distance.run_backtest(eng)
+    first = pd.read_sql(sa.text("SELECT fight_url, p_distance FROM fight_distance_v1 ORDER BY fight_url"), eng)
+    model_distance.run_backtest(eng, rebuild=True)
+    again = pd.read_sql(sa.text("SELECT fight_url, p_distance FROM fight_distance_v1 ORDER BY fight_url"), eng)
+    assert len(again) == len(first) and np.allclose(first.p_distance, again.p_distance)                  # the same model, the same numbers
+
+
+def _announce(eng, rows):
+    pd.DataFrame(rows).to_sql("upcoming_fights", eng, if_exists="append", index=False)
+
+
+def _bout(i, a, b, when="2030-01-10", order=5, title=False, status="scheduled"):
+    return dict(bout_id=f"b{i}", event_name="UFC Future", event_date=when, bout_order=order, weight_class="Lightweight", title_fight=title, fighter_a_name=f"Fighter {a}",
+                fighter_a_url=f"u{a}", fighter_b_name=f"Fighter {b}", fighter_b_url=f"u{b}", status=status)
+
+
+def test_predictions_are_locked_once_before_the_event_and_follow_the_card(tmp_path):
+    import sqlalchemy as sa
+    eng, fin = _distance_db(tmp_path)
+    low, high = np.argsort(fin)[:2], np.argsort(fin)[-2:]
+    _announce(eng, [_bout(1, low[0], low[1]), _bout(2, high[0], high[1], order=1), _bout(3, 1, 2, title=True),
+                    dict(_bout(4, 3, 4, order=6), fighter_a_url="new:x", fighter_b_url="new:y", fighter_a_name="X", fighter_b_name="Y")])
+    assert model_distance.run_predict(eng, date(2029, 12, 1)) == 0
+    p = pd.read_sql(sa.text("SELECT * FROM upcoming_distance_v1"), eng).set_index("bout_id")
+    assert len(p) == 4 and (p.status == "locked").all() and p.predicted_at.notna().all()
+    assert p.loc["b1", "p_distance"] > p.loc["b2", "p_distance"]                                      # two decision-prone fighters vs. two finishers
+    assert (p.loc["b2", "scheduled_rounds"], p.loc["b3", "scheduled_rounds"], p.loc["b1", "scheduled_rounds"]) == (5, 5, 3)   # main event and title fight: five rounds
+    assert p.loc["b4", "tier"] == "debut" and 0 < p.loc["b4", "p_distance"] < 1                       # two unknown fighters still get a sensible number
+    before = p.p_distance.to_dict()
+    model_distance.run_predict(eng, date(2029, 12, 1))
+    assert pd.read_sql(sa.text("SELECT * FROM upcoming_distance_v1"), eng).set_index("bout_id").p_distance.to_dict() == before          # locked picks never change
+    with eng.begin() as c:
+        c.exec_driver_sql("UPDATE upcoming_fights SET status = 'cancelled' WHERE bout_id = 'b1'")
+    model_distance.run_predict(eng, date(2029, 12, 2))
+    assert pd.read_sql(sa.text("SELECT status FROM upcoming_distance_v1 WHERE bout_id = 'b1'"), eng).status[0] == "cancelled"
+    _announce(eng, [_bout(9, 5, 6, when="2029-12-20")])
+    model_distance.run_predict(eng, date(2029, 12, 20))                                               # announced on the day of the event: too late to lock
+    assert pd.read_sql(sa.text("SELECT COUNT(*) n FROM upcoming_distance_v1 WHERE bout_id = 'b9'"), eng).n[0] == 0
+
+
+def test_grading_waits_for_the_dataset_then_records_what_happened(tmp_path):
+    import sqlalchemy as sa
+    eng, _ = _distance_db(tmp_path)
+    _announce(eng, [_bout(1, 1, 2, when="2030-01-10"), _bout(2, 3, 4, when="2030-01-10"), _bout(3, 5, 6, when="2030-01-10"), _bout(4, 7, 8, when="2031-01-10")])
+    model_distance.run_predict(eng, date(2029, 12, 1))
+    model_distance.run_grade(eng)
+    assert pd.read_sql(sa.text("SELECT COUNT(*) n FROM upcoming_distance_v1 WHERE graded_at IS NOT NULL"), eng).n[0] == 0      # the dataset has nothing from that night yet
+    fights = [("g1", "Decision - Unanimous", 3, "5:00", 1, 2), ("g2", "KO/TKO", 1, "1:30", 3, 4), ("g3", "DQ", 2, "3:00", 5, 6)]                     # one night's results arrive
+    for fu, res, fr, ft, a, b in fights:
+        pd.DataFrame([dict(fight_url=fu, event_date="2030-01-10", event_name="UFC Future", weight_class="Lightweight", title_fight=0, num_rounds=3, result=res, finish_round=fr, finish_time=ft)]).to_sql("fights", eng, if_exists="append", index=False)
+        pd.DataFrame([dict(fight_url=fu, fighter_url=f"u{x}", fighter_name=f"Fighter {x}", side=s, won=int(s == 1)) for s, x in ((1, a), (2, b))]).to_sql("fighter_fights", eng, if_exists="append", index=False)
+    model_distance.run_grade(eng)
+    g = pd.read_sql(sa.text("SELECT bout_id, went_distance, status FROM upcoming_distance_v1"), eng).set_index("bout_id")
+    assert (g.loc["b1", "went_distance"], g.loc["b2", "went_distance"]) == (1, 0)                      # a decision went the distance; a first-round KO did not
+    assert g.loc["b3", "status"] == "no_result"                                                       # a disqualification is left out, as in the backtest
+    assert pd.isna(g.loc["b4", "went_distance"]) and g.loc["b4", "status"] == "locked"               # a later card is still waiting
+
+
+def test_scheduled_rounds_are_inferred_from_title_fight_or_main_event():
+    assert model_distance.scheduled_rounds(True, 4) == 5 and model_distance.scheduled_rounds(False, 1) == 5
+    assert model_distance.scheduled_rounds(False, 2) == 3 and model_distance.scheduled_rounds(False, None) == 3
+
+
+def test_the_distance_scores_match_hand_calculations():
+    d = pd.DataFrame({"event_date": ["2020-01-01"] * 4 + ["2021-01-01"] * 4, "went_distance": [1, 0, 1, 0, 1, 1, 0, 0],
+                      "p_distance": [0.8, 0.2, 0.7, 0.3, 0.6, 0.7, 0.4, 0.3], "p_base": 0.5, "tier": "full"})
+    s = distance_scores.distance_scores(d, min_year_fights=1)
+    y, p = d.went_distance.to_numpy(), d.p_distance.to_numpy()
+    assert abs(s["scores"]["model"]["log_loss"] - (-(y * np.log(p) + (1 - y) * np.log(1 - p)).mean())) < 1e-9
+    assert abs(s["scores"]["coin"]["log_loss"] - np.log(2)) < 1e-9 and s["scores"]["coin"]["brier"] == 0.25
+    assert distance_scores.auc([1, 1, 0, 0], [0.9, 0.8, 0.2, 0.1]) == 1.0 and distance_scores.auc([1, 0, 1, 0], [0.5, 0.5, 0.5, 0.5]) == 0.5
+    assert s["years_total"] == 2 and s["years_better"] == 2 and s["first_year"] == 2020 and s["last_year"] == 2021
+    assert sum(c["n"] for c in s["calibration"]) == 8 and abs(sum(c["n"] * c["predicted"] for c in s["calibration"]) / 8 - p.mean()) < 1e-9
+
+
+def test_the_daily_job_locks_grades_and_scores_the_distance_predictions():
+    import inspect
+    assert 'model_distance.main(["predict"' in inspect.getsource(au.step_v2)                           # locked alongside the winner picks
+    src = inspect.getsource(au.step_results)
+    assert 'model_distance.main(["grade"])' in src and 'model_distance.main(["backtest"])' in src      # graded and scored with the results
+
+
+def test_the_distance_section_of_the_readme_comes_from_the_database(tmp_path):
+    eng, *_ = _synthetic(tmp_path)
+    nums = readme_numbers.compute(readme_numbers.load_frames(eng), n_tests=1)
+    v, rows = nums.values, nums.blocks["distance_table"].splitlines()
+    assert v["dist_n"] == "6,000" and v["dist_first_year"] == "2006" and v["dist_last_year"] == "2026" and v["dist_years_total"] == "21" and v["dist_years_better"] == "21"
+    assert float(v["dist_gain"]) > 0 and float(v["dist_gain_lo"]) < float(v["dist_gain"]) < float(v["dist_gain_hi"]) and float(v["dist_gap"]) < 5
+    assert rows[0] == "| Predictor | Log loss | Brier score | AUC |" and len(rows) == 5 and rows[-1].startswith("| **Goes-the-distance model** | **")
+    assert "Coin flip | 0.6931 | 0.2500 | 0.500 |" in rows[2]
+    assert nums.broken_claims == []                                                                      # informative and calibrated: every claim holds
+
+
+def test_distance_claims_that_stop_holding_are_flagged(tmp_path):
+    eng, *_ = _synthetic(tmp_path, claims_hold=False)                                                    # the model now just repeats the base rate
+    broken = " ".join(readme_numbers.compute(readme_numbers.load_frames(eng), n_tests=1).broken_claims)
+    assert "goes-the-distance model beats the plain decision rate by a clear margin" in broken and "in most years" in broken
+    assert "dist_gain" not in readme_numbers.compute(readme_numbers.load_frames(eng), n_tests=1).values                # and it refuses to print a gain that is not there
+
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "app"))
+import distance_ui  # noqa: E402
+
+
+def test_the_distance_line_reads_naturally():
+    assert "54%" in distance_ui.line_html(0.54, 3) and "could go either way" in distance_ui.line_html(0.54, 3) and "3 rounds" in distance_ui.line_html(0.54, 3)
+    assert "likely to go to a decision" in distance_ui.line_html(0.60, 3) and "likely to end early" in distance_ui.line_html(0.40, 5)         # the edges of the bands
+    assert "5 rounds" in distance_ui.line_html(0.30, 5) and "limited data" in distance_ui.line_html(0.5, 3, "debut") and "limited data" not in distance_ui.line_html(0.5, 3, "full")
+
+
+def _scored_frame(n=3000, seed=8, informative=True):
+    r = np.random.default_rng(seed)
+    p = r.uniform(0.25, 0.75, n)
+    return pd.DataFrame({"event_date": [f"{y}-06-01" for y in r.integers(2008, 2027, n)], "p_distance": p if informative else 0.5, "p_base": 0.5,
+                         "went_distance": (r.uniform(size=n) < p).astype(int), "tier": r.choice(["full", "limited", "debut"], n)})
+
+
+def test_the_track_record_section_shows_the_scores_the_calibration_and_the_locked_record():
+    s = distance_scores.distance_scores(_scored_frame())
+    page = distance_ui.section_html(s)
+    assert "Will the fight go the distance?" in page and page.count('<table class="hist">') == 3 and "clearly better" in page
+    assert "Goes-the-distance model" in page and "<b>" in page and "locked record" not in page                          # no live predictions yet: no live paragraph
+    live = distance_scores.distance_scores(_scored_frame(14, seed=9).assign(event_date="2026-10-24"))
+    with_live = distance_ui.section_html(s, live)
+    assert "The locked record:</b> 14 graded predictions" in with_live and "too few fights to conclude anything" in with_live
+    flat = distance_ui.section_html(distance_scores.distance_scores(_scored_frame(informative=False)))
+    assert "cannot be told apart" in flat and "<b>0." not in flat.split("Goes-the-distance model")[1].split("</tr>")[0]      # a model with no edge is not shown in bold
+
+
+def test_the_app_shows_the_prediction_in_all_three_bout_layouts_and_on_the_track_record_page():
+    src = (Path(__file__).resolve().parent.parent / "app" / "streamlit_app.py").read_text(encoding="utf-8")
+    assert src.count("{dist_html(r)}") == 3 and "dist_section_html(distance_scores.distance_scores(dd), live_d)" in src
+    assert "from distance_ui import" in src and 'sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "pipeline"))' in src

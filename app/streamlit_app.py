@@ -13,15 +13,21 @@ from __future__ import annotations
 
 import html
 import json
-from types import SimpleNamespace
 import os
+import sys
 from datetime import date
+from pathlib import Path
+from types import SimpleNamespace
 
 import altair as alt
 import numpy as np
 import pandas as pd
 import sqlalchemy as sa
 import streamlit as st
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "pipeline"))      # the shared scoring maths (numpy and pandas only)
+import distance_scores  # noqa: E402
+from distance_ui import line_html as dist_line_html, section_html as dist_section_html  # noqa: E402
 
 st.set_page_config(page_title="UFC Fight Predictor", page_icon="🥊", layout="wide", initial_sidebar_state="collapsed")
 
@@ -164,6 +170,9 @@ label[data-testid="stRadioOption"][data-selected="true"] p {color:#171717; font-
 .ufc .note {color:var(--muted); font-style:italic; font-size:.9rem; margin-top:10px;}
 .ufc .foot {margin-top:42px; border-top:1px solid var(--ink); padding-top:10px; color:var(--muted); font-style:italic; font-size:.88rem;}
 
+/* goes the distance */
+.ufc .dist {margin-top:10px; font-size:.98rem;}
+.ufc .dist .k {font-family:'IBM Plex Mono','Courier New',monospace; font-size:.64rem; letter-spacing:.12em; text-transform:uppercase; color:var(--muted); margin-right:10px;}
 /* why this pick */
 .ufc .whyrow {padding:0 0 12px 0;} .ufc .whyrow details {margin-top:0;}
 .ufc .why {margin-top:6px;}
@@ -437,6 +446,24 @@ def scoring_html(r: dict) -> str:
             f'is less sharp than the closing line.{need} Not betting advice.</div>')
 
 
+DISTANCE: dict = {}         # bout_id -> (chance it goes the distance, scheduled rounds, tier), filled by the Upcoming page
+
+
+def has_table(name: str) -> bool:
+    try:
+        return bool(q("SELECT to_regclass(:t) IS NOT NULL AS ok", {"t": f"public.{name}"}).ok.iloc[0])
+    except Exception:
+        return False
+
+
+def dist_html(r) -> str:
+    try:
+        x = DISTANCE.get(getattr(r, "bout_id", None))
+        return dist_line_html(x[0], x[1], x[2]) if x else ""
+    except Exception:
+        return ""                         # a prediction line must never break the page
+
+
 def has_fight_reasons() -> bool:
     try:
         return bool(q("SELECT to_regclass('public.fight_reasons') IS NOT NULL AS ok").ok.iloc[0])
@@ -555,7 +582,7 @@ def main_event_html(r, rec: dict) -> str:
             f'<div class="duel">{side_html(r.fighter_a, rec.get(r.fighter_a_url, "UFC debut"), "a", pa)}<div class="vs">vs.</div>'
             f'{side_html(r.fighter_b, rec.get(r.fighter_b_url, "UFC debut"), "b", pb)}</div>'
             f'<div style="margin-top:20px">{scale}</div><div class="verdict">{verdict}</div>'
-            f'{why_html(r, True)}{tape_details(pd.Series(r._asdict()), r.fighter_a, r.fighter_b, open_=True)}</div>')
+            f'{dist_html(r)}{why_html(r, True)}{tape_details(pd.Series(r._asdict()), r.fighter_a, r.fighter_b, open_=True)}</div>')
 
 
 def bout_html(r, rec: dict) -> str:
@@ -566,7 +593,7 @@ def bout_html(r, rec: dict) -> str:
             f'<div class="duel">{side_html(r.fighter_a, rec.get(r.fighter_a_url, "UFC debut"), "a", pa)}<div class="vs">vs.</div>'
             f'{side_html(r.fighter_b, rec.get(r.fighter_b_url, "UFC debut"), "b", pb)}</div>'
             f'<div style="margin-top:14px">{scale}</div><div class="verdict">{verdict}</div>'
-            f'{why_html(r)}{tape_details(pd.Series(r._asdict()), r.fighter_a, r.fighter_b)}</div>')
+            f'{dist_html(r)}{why_html(r)}{tape_details(pd.Series(r._asdict()), r.fighter_a, r.fighter_b)}</div>')
 
 
 def prow_html(r, rec: dict) -> str:
@@ -584,7 +611,7 @@ def prow_html(r, rec: dict) -> str:
             f'{side_html(r.fighter_a, rec.get(r.fighter_a_url, "UFC debut"), "a", pa)}'
             f'<div class="mid"><div class="label" style="justify-content:center;margin:0 0 6px">{div}</div>{scale}{small}</div>'
             f'{side_html(r.fighter_b, rec.get(r.fighter_b_url, "UFC debut"), "b", pb)}</div>'
-            f'{why_html(r)}{tape_details(pd.Series(r._asdict()), r.fighter_a, r.fighter_b)}</div>')
+            f'{dist_html(r)}{why_html(r)}{tape_details(pd.Series(r._asdict()), r.fighter_a, r.fighter_b)}</div>')
 
 
 def page_upcoming():
@@ -654,6 +681,13 @@ def page_upcoming():
         rr = q("SELECT bout_id, version, reasons FROM pick_reasons WHERE bout_id = ANY(:ids)", {"ids": [str(x) for x in bouts.bout_id]})
         for x in rr.itertuples():
             REASONS.setdefault(x.bout_id, {})[x.version] = x.reasons if isinstance(x.reasons, dict) else json.loads(x.reasons)
+
+    DISTANCE.clear()
+    if has_table("upcoming_distance_v1"):
+        dd = q("SELECT bout_id, p_distance, scheduled_rounds, tier FROM upcoming_distance_v1 WHERE status = 'locked' AND bout_id = ANY(:ids)",
+               {"ids": [str(x) for x in bouts.bout_id]})
+        for x in dd.itertuples():
+            DISTANCE[x.bout_id] = (float(x.p_distance), int(x.scheduled_rounds), str(x.tier))
 
     urls = list(set(live.fighter_a_url) | set(live.fighter_b_url))
     rec = {}
@@ -986,6 +1020,15 @@ def page_track():
     if len(old) and not isnull(old.iloc[0].n) and int(old.iloc[0].n) > 0:
         module_html(f'<div class="note">Model v1 (the first version, which skipped fights with limited history) has {int(old.iloc[0].n)} graded locked picks, '
                     f'{int(old.iloc[0].c)} right. Version 2 replaced it.</div>')
+
+    if has_table("fight_distance_v1"):
+        dd = q("SELECT event_date, p_distance, p_base, went_distance, tier FROM fight_distance_v1")
+        if len(dd) >= 200:
+            live_d = None
+            if has_table("upcoming_distance_v1"):
+                lv = q("SELECT event_date, p_distance, p_base, went_distance FROM upcoming_distance_v1 WHERE status = 'locked' AND graded_at IS NOT NULL")
+                live_d = distance_scores.distance_scores(lv) if len(lv) >= 5 else None
+            module_html(dist_section_html(distance_scores.distance_scores(dd), live_d))
 
 
 # ------------------------------------------------------------------------------------------------
