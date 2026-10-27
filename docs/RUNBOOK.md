@@ -15,7 +15,7 @@ This is the hands-on guide: what each piece does, the commands to run it, and th
 | Announced cards (manual) | `pipeline/upcoming.py` | Loads a card from a CSV, locks picks before the event, grades them after |
 | **Model v2** | `pipeline/model_v2.py`, `sql/model_v2.sql` | The statistical model: a pick for every fight, past and upcoming |
 | **Model v3** | `pipeline/model_v3.py`, `sql/model_v3.sql` | v2 plus the betting market |
-| **Automation** | `pipeline/auto_update.py`, `.github/workflows/auto-update.yml` | Daily job: cards, lines, picks, results, odds history |
+| **Automation** | `pipeline/auto_update.py` (entry point) and `pipeline/auto_*.py` (see below), `.github/workflows/auto-update.yml` | Daily job: cards, lines, picks, results, odds history |
 | **Goes the distance** | `pipeline/model_distance.py`, `pipeline/distance_scores.py`, `app/distance_ui.py` | The chance each fight goes to a decision: backtest, locked predictions for upcoming bouts, grading, and its display |
 | **Backups** | `pipeline/backup.py`, `.github/workflows/backup.yml` | Weekly CSV backup of every table to a private repository, with a verifier and a safe restore |
 | **README numbers** | `pipeline/readme_numbers.py` | Keeps every live number and table in `README.md` equal to the database |
@@ -100,6 +100,21 @@ All database commands below need a PostgreSQL database (a free hosted one such a
    python -m pytest -q tests
    ```
 
+## How the daily job is organised
+
+`pipeline/auto_update.py` is only the entry point: it reads the command line, runs the steps in order (one failing never blocks the others) and prints the report. The work lives in six small modules. Each may import only from the ones listed against it, so there are no circular dependencies (a test enforces this):
+
+| Module | What it holds | May import |
+|---|---|---|
+| `auto_common.py` | the logger, the project root, the `Report` printed at the end | nothing |
+| `auto_names.py` | fighter-name matching: resolving a card name without guessing, and matching betting-site names (the most delicate logic) | nothing |
+| `auto_cards.py` | Wikipedia: the schedule, fight cards, `step_cards` | common, names |
+| `auto_odds.py` | The Odds API, the private odds history, `step_odds`, `odds_history`, the Monday odds-dataset refresh | common, names |
+| `auto_picks.py` | locking picks: `step_v2` and `step_lock` | common |
+| `auto_results.py` | the Kaggle download, grading and scoring: `step_results` | common |
+
+`auto_update.py` re-exports every name it has ever exposed, so `import auto_update` and `python pipeline/auto_update.py <command>` work exactly as before. To add a step, write it in the module it belongs to, then register it in `run()` and in the `choices` list in `main()`; a test checks that the two stay in step.
+
 ## The pick log, and pushing code afterwards
 
 After each real run the GitHub job commits `picks_log/locked_picks.csv` (only that folder). That means the repository on GitHub moves ahead of your computer, so **pull before you push**:
@@ -151,7 +166,7 @@ sql/features.sql             feature views (window functions)
 sql/predictions.sql          prediction table and dashboard views
 sql/model_v2.sql, model_v3.sql   tables and views for the two model versions
 sql/readonly_role.sql        read-only database user for the web app
-pipeline/                    predict.py, update_from_csv.py, upcoming.py, model_v2.py, model_v3.py, auto_update.py, pick_log.py, digest.py, requirements.txt
+pipeline/                    predict.py, update_from_csv.py, upcoming.py, model_v2.py, model_v3.py, auto_update.py (entry point), auto_common/names/cards/odds/picks/results.py, pick_log.py, digest.py, requirements.txt
 app/                         streamlit_app.py and its requirements
 .streamlit/config.toml       the web app's theme
 tests/                       offline tests

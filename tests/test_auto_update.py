@@ -1118,3 +1118,54 @@ def test_json_cells_are_written_with_sorted_keys_and_missing_values_as_blank():
     out = backup.format_frame(df)
     assert out.j[0] == '{"a":[2,1],"b":1}' and pd.isna(out.j[1])
     assert out.to_csv(index=False, lineterminator="\n", na_rep="").splitlines() == ["j,n", '"{""a"":[2,1],""b"":1}",1.5', ",".join(["", ""])]
+
+
+# ---------------------------------------------------------------------------------------------- the daily job is split into modules; these guard the seams
+_NAMES_AUTO_UPDATE_HAS_ALWAYS_EXPOSED = (
+    "ACTIVE_DAYS HORIZON_DAYS KAGGLE_DATASET LOCK_DAYS MAX_SHRINK ODDS_DATASET_REPO ODDS_URL ROOT Report SEPARATORS SNAPSHOT_DDL SNAPSHOT_GAP_HOURS UA URGENT_DAYS WIKI_API "
+    "classify_unmatched clean ensure_snapshot_tables event_books event_consensus fetch_odds kaggle_api kaggle_configured letters_key log main match_line_to_bout name_sim "
+    "odds_history orient_books parse_card parse_date parse_scheduled_events resolve_name run step_cards step_lock step_odds step_refresh_odds step_results step_v2 wiki_html "
+    "_pair_sim digest model_distance model_v2 model_v3 pick_log readme_numbers update_from_csv upcoming").split()
+
+
+def test_auto_update_still_exposes_every_name_it_always_did():
+    missing = [n for n in _NAMES_AUTO_UPDATE_HAS_ALWAYS_EXPOSED if not hasattr(au, n)]
+    assert missing == [], f"auto_update no longer exposes: {missing}"
+    import auto_cards, auto_names, auto_odds, auto_results
+    assert au.resolve_name is auto_names.resolve_name and au.step_cards is auto_cards.step_cards                      # the very same objects, not copies
+    assert au.step_odds is auto_odds.step_odds and au.step_results is auto_results.step_results
+    assert au.__all__ and all(hasattr(au, n) for n in au.__all__)
+
+
+def test_the_modules_only_depend_on_the_ones_below_them():
+    import ast
+    layers = {"auto_common": [], "auto_names": [], "auto_cards": ["auto_common", "auto_names"], "auto_odds": ["auto_common", "auto_names"],
+              "auto_picks": ["auto_common"], "auto_results": ["auto_common"]}                                           # who each module may import
+    for mod, allowed in layers.items():
+        tree = ast.parse((Path(__file__).resolve().parent.parent / "pipeline" / f"{mod}.py").read_text(encoding="utf-8"))
+        imported = {n.module for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) and n.module and n.module.startswith("auto_")}
+        imported |= {a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names if a.name.startswith("auto_")}
+        assert imported <= set(allowed), f"{mod} imports {sorted(imported - set(allowed))}, which would create a cycle or skip a layer"
+
+
+def test_every_command_runs_a_step_and_every_step_has_a_command():
+    import inspect
+    import re as regex
+    steps = set(regex.findall(r'^\s+"([a-z0-9-]+)": lambda', inspect.getsource(au.run), regex.M))
+    choices = set(regex.findall(r'"([a-z0-9-]+)"', regex.search(r"choices=\[(.*?)\]", inspect.getsource(au.main), regex.S).group(1)))
+    assert steps <= choices and choices - steps == {"all", "odds-history", "discord-test"}                                  # the three that are not steps of `all`
+    assert list(regex.findall(r'^\s+"([a-z0-9-]+)": lambda', inspect.getsource(au.run), regex.M))[:2] == ["cards", "v2"]      # and the order they run in is unchanged
+
+
+def test_a_command_runs_end_to_end_through_the_entry_point(tmp_path, monkeypatch, capsys):
+    import model_v2
+    eng = _empty_engine(tmp_path)
+    model_distance.ensure_tables(eng)
+    monkeypatch.setattr(model_v2, "make_engine", lambda: eng)
+    monkeypatch.delenv("DISCORD_WEBHOOK_URL", raising=False)
+    assert au.main(["pick-log", "--dry-run", "--today", "2026-10-27"]) == 0
+    assert "Public pick log" in capsys.readouterr().out
+    assert au.main(["digest", "--dry-run", "--today", "2026-10-27"]) == 0
+    assert "No DISCORD_WEBHOOK_URL set, skipped." in capsys.readouterr().out
+    assert au.main(["readme", "--dry-run", "--today", "2026-10-26"]) in (0, 3)                                           # a Monday: the README step runs
+    assert "README numbers" in capsys.readouterr().out
