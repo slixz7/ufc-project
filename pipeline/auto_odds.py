@@ -110,12 +110,15 @@ SNAPSHOT_DDL = [
               MAX(market_prob_a) FILTER (WHERE rn_first = 1) AS first_prob_a,
               MAX(market_prob_a) FILTER (WHERE rn_last = 1)  AS last_prob_a
        FROM r GROUP BY bout_id""",
-    # the raw prices are kept private: the website's read-only user cannot see them (the app never shows odds)
-    """DO $$ BEGIN
-         IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'app_reader') THEN
-           EXECUTE 'REVOKE ALL ON odds_snapshots FROM app_reader';
-           EXECUTE 'REVOKE ALL ON odds_bout_summary FROM app_reader';
-         END IF;
+    # the raw prices are kept private: the website's read-only logins (the current one and the old one) cannot see them (the app never shows odds)
+    # (quote_ident and || rather than format('%I'): a % in a statement sent without parameters can upset the database driver)
+    """DO $$ DECLARE r text; BEGIN
+         FOREACH r IN ARRAY ARRAY['site_reader', 'app_reader'] LOOP
+           IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r) THEN
+             EXECUTE 'REVOKE ALL ON odds_snapshots FROM ' || quote_ident(r);
+             EXECUTE 'REVOKE ALL ON odds_bout_summary FROM ' || quote_ident(r);
+           END IF;
+         END LOOP;
        END $$""",
 ]
 

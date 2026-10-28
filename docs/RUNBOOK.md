@@ -17,6 +17,8 @@ This is the hands-on guide: what each piece does, the commands to run it, and th
 | **Model v3** | `pipeline/model_v3.py`, `sql/model_v3.sql` | v2 plus the betting market |
 | **Automation** | `pipeline/auto_update.py` (entry point) and `pipeline/auto_*.py` (see below), `.github/workflows/auto-update.yml` | Daily job: cards, lines, picks, results, odds history |
 | **Goes the distance** | `pipeline/model_distance.py`, `pipeline/distance_scores.py`, `app/distance_ui.py` | The chance each fight goes to a decision: backtest, locked predictions for upcoming bouts, grading, and its display |
+| **Read-only login** | `pipeline/db_roles.py` | Creates and audits the website's read-only database login, and retires an over-powered old one |
+| **Friends' game** | `app/game_ui.py`, `pipeline/game_core.py`, `game_db.py`, `game_admin.py`, `bout_results.py` | A private "beat the model" game on the site's Game page, with its own locked-down database user |
 | **Backups** | `pipeline/backup.py`, `.github/workflows/backup.yml` | Weekly CSV backup of every table to a private repository, with a verifier and a safe restore |
 | **README numbers** | `pipeline/readme_numbers.py` | Keeps every live number and table in `README.md` equal to the database |
 | **Pick log** | `pipeline/pick_log.py`, `picks_log/` | Public, time-stamped record of every locked pick and goes-the-distance prediction (two files), committed by the daily job |
@@ -26,7 +28,7 @@ This is the hands-on guide: what each piece does, the commands to run it, and th
 
 ## Run it yourself
 
-All database commands below need a PostgreSQL database (a free hosted one such as Neon works). Use two connection strings: an **owner** string for anything that writes (everything except the web app) and a **read-only** string for the web app (`sql/readonly_role.sql`). Never commit a connection string.
+All database commands below need a PostgreSQL database (a free hosted one such as Neon works). Use two connection strings: an **owner** string for anything that writes (everything except the web app) and a **read-only** string for the web app, made with `python pipeline/db_roles.py reader` (see *The website's read-only login* below; **never create it in Neon's web console**). Never commit a connection string.
 
 1. **Data.** Download the fights CSV from Kaggle (`scarekrow/ufc-data`) into `data/` (not included here; check its licence on Kaggle).
 2. **Install.**
@@ -126,6 +128,39 @@ git push
 
 Only the GitHub job writes the log (your own runs skip it, so the two never collide); `pick-log --write-pick-log` forces it. To make the history harder to rewrite, protect `main` against force pushes and deletions (Settings, Rules, New branch ruleset) and leave "Require a pull request" **off**, or the job's own push is blocked.
 
+## The website's read-only login
+
+The public site must connect with a login that can only read, so that a leaked password could not change your data. **Make it with `python pipeline/db_roles.py reader`, never in Neon's web console.** A login made in the console is automatically given extra powers (it joins Neon's `neon_superuser` role, which can read and write every table and create other logins), so it is not read-only whatever grants are added. A login made with SQL has none of that.
+
+With your **owner** connection string loaded:
+
+- `python pipeline/db_roles.py reader` creates (or repairs) the login `site_reader`: SELECT on the public tables only, nothing on the private ones (`odds_snapshots`, `odds_bout_summary` and the game's tables). It checks the result and writes its connection string to `data/site_database_url.txt` without printing it. Put that in the site's secrets as `DATABASE_URL`, then delete the file.
+- `python pipeline/db_roles.py audit` checks that login (no extra roles or powers, no write access, no private tables, cannot create anything) and flags an over-powered old login if one still exists. Run it after any change to database permissions.
+- `python pipeline/db_roles.py retire-old` strips the old login `app_reader` of every grant and, where Neon allows it, stops it logging in and replaces its password. Then delete it in the Neon console (Roles & Databases).
+- A leaked or lost read-only connection string: `python pipeline/db_roles.py reader --rotate-password`, then update the secret.
+- Anything else that used the old login (for example Power BI) must be switched to the new string.
+
+## The friends' game
+
+A private "beat the model" game on the site's **Game** page (the rules are in its *How it works* tab and in the README). It writes to the database through **its own database user**, which can touch only `game_players`, `game_picks` and `game_attempts`; the site's read-only user cannot read them.
+
+One-off setup, with your **owner** connection string loaded:
+
+1. `python pipeline/game_admin.py setup` creates the tables and the game's database user, runs an audit, and writes the new connection string to `data/game_database_url.txt` (git ignores `data/`). It never prints the password.
+2. `python pipeline/bout_results.py record` records how past bouts ended, so cards that have already happened can be scored. The daily job does this from then on.
+3. In Streamlit (your app, Settings, Secrets) add two lines: `GAME_DATABASE_URL = "<the line from the file>"` and `GAME_INVITE_CODE = "<a code you choose>"`. Then **delete the file**.
+4. Reboot the app, open **Game**, join, and give your friends the invite code privately.
+
+Running it:
+
+- `python pipeline/game_admin.py players` lists who has joined and how many picks each has made.
+- A forgotten PIN: `python pipeline/game_admin.py reset-pin "Nickname"` prints a new one once; tell them privately. It also clears a lockout. `delete "Nickname"` removes a player and their picks.
+- `python pipeline/game_admin.py audit` checks that the game user can reach the game tables and nothing else, and that the read-only user cannot read them. Run it after any change to database permissions.
+- A leaked invite code: change the `GAME_INVITE_CODE` secret. Existing players are unaffected. A new database password: `python pipeline/game_admin.py setup --rotate-password`, then update `GAME_DATABASE_URL`.
+- Picks close at 00:00 UTC on the event date. Wrong PINs lock a nickname (5 in 15 minutes, 20 a day); wrong invite codes pause joining (10 an hour); at most 100 players.
+- The weekly backup includes the game tables (nicknames, hashed PINs and picks) in the private backup repository.
+- The tests that check the permissions need a Postgres server: the Tests workflow starts one. To run them yourself, set `TEST_PG_ADMIN_URL` to a server where that user may create databases and roles; without it they skip.
+
 ## Backups
 
 `.github/workflows/backup.yml` runs every Sunday (and on demand), dumps every table except the rebuildable `fight_reasons` cache to plain CSV in a stable order, checks the files against `MANIFEST.csv`, and commits them to a **private** repository named `ufc-project-backups`. A week with no new data produces identical files and no commit.
@@ -165,8 +200,8 @@ When the daily report lists a held name, add one line to `upcoming/aliases.csv` 
 sql/features.sql             feature views (window functions)
 sql/predictions.sql          prediction table and dashboard views
 sql/model_v2.sql, model_v3.sql   tables and views for the two model versions
-sql/readonly_role.sql        read-only database user for the web app
-pipeline/                    predict.py, update_from_csv.py, upcoming.py, model_v2.py, model_v3.py, auto_update.py (entry point), auto_common/names/cards/odds/picks/results.py, pick_log.py, digest.py, requirements.txt
+sql/readonly_role.sql        explains the read-only login (created by pipeline/db_roles.py)
+pipeline/                    predict.py, game_core.py, game_db.py, game_admin.py, bout_results.py, update_from_csv.py, upcoming.py, model_v2.py, model_v3.py, auto_update.py (entry point), auto_common/names/cards/odds/picks/results.py, pick_log.py, digest.py, requirements.txt
 app/                         streamlit_app.py and its requirements
 .streamlit/config.toml       the web app's theme
 tests/                       offline tests

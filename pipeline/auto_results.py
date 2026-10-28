@@ -7,6 +7,7 @@ from pathlib import Path
 
 import sqlalchemy as sa
 
+import bout_results
 import model_distance
 import model_v2
 import model_v3
@@ -72,7 +73,8 @@ def step_results(engine, today: date, rep: Report, dry_run: bool, workdir: Path)
     for fn, label in ((lambda: model_v2.main(["grade"]), "grade v2"), (lambda: model_v3.main(["grade"]), "grade v3"),
                       (lambda: model_v2.main(["backtest"]), "score new fights (v2)"),
                       (lambda: model_distance.main(["grade"]), "grade goes-the-distance predictions"),
-                      (lambda: model_distance.main(["backtest"]), "score new fights (goes the distance)")):
+                      (lambda: model_distance.main(["backtest"]), "score new fights (goes the distance)"),
+                      (lambda: bout_results.main(["record", "--today", today.isoformat()]), "record how bouts ended (for the friends' game)")):
         rc = fn()
         if rc not in (0, None):
             raise RuntimeError(f"{label} returned {rc}")

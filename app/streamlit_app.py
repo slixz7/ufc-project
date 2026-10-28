@@ -28,6 +28,7 @@ import streamlit as st
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "pipeline"))      # the shared scoring maths (numpy and pandas only)
 import distance_scores  # noqa: E402
 from distance_ui import line_html as dist_line_html, section_html as dist_section_html  # noqa: E402
+import game_ui  # noqa: E402
 
 st.set_page_config(page_title="UFC Fight Predictor", page_icon="🥊", layout="wide", initial_sidebar_state="collapsed")
 
@@ -210,12 +211,30 @@ label[data-testid="stRadioOption"][data-selected="true"] p {color:#171717; font-
 # database
 # ------------------------------------------------------------------------------------------------
 @st.cache_resource
-def _make_engine(url: str):
+def _make_engine(url: str, pool_size: int = 5, max_overflow: int = 10):
     for prefix in ("postgres://", "postgresql://"):
         if url.startswith(prefix):
             url = "postgresql+psycopg2://" + url[len(prefix):]
     # connect_timeout: a database that does not answer shows the error message instead of an endless blank page
-    return sa.create_engine(url, pool_pre_ping=True, connect_args={"connect_timeout": 12})
+    return sa.create_engine(url, pool_pre_ping=True, pool_size=pool_size, max_overflow=max_overflow, connect_args={"connect_timeout": 12})
+
+
+def _secret(name: str):
+    try:
+        value = st.secrets.get(name)
+    except Exception:                      # no secrets file when running locally
+        value = None
+    return value or os.getenv(name)
+
+
+def get_game_engine():
+    """The friends' game's own database user (it can touch only the game tables), or None until the secret is set. Kept to at most 6 connections."""
+    url = _secret("GAME_DATABASE_URL")
+    return _make_engine(url, pool_size=3, max_overflow=3) if url else None
+
+
+def page_game():
+    game_ui.render(q, get_game_engine(), _secret("GAME_INVITE_CODE"))
 
 
 def get_engine():
@@ -1047,11 +1066,11 @@ def main():
     today = date.today()
     module_html(f'<div class="mast"><div class="top"><div class="brand disp">UFC Fight Predictor</div>'
                 f'<div class="dateline mono">{esc(today.strftime("%A, %B %d, %Y"))} &nbsp;·&nbsp; Results through {esc(f_date(newest))}</div></div></div>')
-    page = st.radio("Navigate", ["Upcoming", "Past events", "Fighters", "Track record"],
+    page = st.radio("Navigate", ["Upcoming", "Past events", "Fighters", "Track record", "Game"],
                     horizontal=True, label_visibility="collapsed")
     try:
         {"Upcoming": page_upcoming, "Past events": page_past, "Fighters": page_fighters,
-         "Track record": page_track}[page]()
+         "Track record": page_track, "Game": page_game}[page]()
     except (sa.exc.SQLAlchemyError, RuntimeError):
         st.error("Couldn't load data right now. If the database was idle it may need a few seconds to wake up; "
                  "refresh the page and try again.")

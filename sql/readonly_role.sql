@@ -1,14 +1,19 @@
 -- =====================================================================
--- Read-only database user for the public web app.
--- The app only ever reads, so give it a user that CAN'T change anything: if its password
--- leaks, nobody can alter or delete your data.
+-- The website's read-only database login.
 --
--- 1. Create the role. In Neon: Roles & Databases -> add a role named app_reader (copy its password),
---    OR run the next line yourself (replace the password with a long random one):
---      CREATE ROLE app_reader WITH LOGIN PASSWORD 'replace-with-a-long-random-password';
--- 2. Run the lines below once in the Neon SQL Editor, signed in as the project owner.
+-- DO NOT create it in Neon's web console. A login made there is automatically given extra powers (it joins Neon's `neon_superuser`
+-- role), which can READ AND WRITE every table and create other logins: it is not read-only, whatever grants are added here.
+--
+-- Create it with the project's own tool instead (run with your OWNER connection string loaded as DATABASE_URL):
+--
+--     python pipeline/db_roles.py reader      creates the login `site_reader`: plain SQL, no extra roles or powers, SELECT on the public
+--                                             tables only, no access to the private ones (raw odds, the game's players and picks)
+--     python pipeline/db_roles.py audit       checks it (and any old login) for real read-only-ness
+--
+-- What `reader` does, in plain SQL (the tool also checks the result):
+--     CREATE ROLE site_reader WITH LOGIN PASSWORD '<random>' NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+--     GRANT USAGE ON SCHEMA public TO site_reader;
+--     GRANT SELECT ON ALL TABLES IN SCHEMA public TO site_reader;
+--     ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO site_reader;   -- tables made later are readable...
+--     REVOKE ALL ON odds_snapshots, odds_bout_summary, game_players, game_picks, game_attempts FROM site_reader;   -- ...except these
 -- =====================================================================
-GRANT USAGE ON SCHEMA public TO app_reader;
-GRANT SELECT ON ALL TABLES IN SCHEMA public TO app_reader;
--- views and tables created later by the owner (for example when upcoming.py setup recreates the views)
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO app_reader;

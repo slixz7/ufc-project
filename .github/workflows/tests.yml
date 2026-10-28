@@ -1,7 +1,8 @@
 name: Tests
 
-# Runs the offline tests and a static check on every push and pull request. It needs no secrets and cannot touch the database:
-# the tests use throwaway in-memory databases. (The daily "Auto update" job runs the same tests before it writes anything.)
+# Runs the offline tests and a static check on every push and pull request. It needs no secrets and cannot touch your database:
+# the tests use throwaway databases, including a throwaway Postgres server started below for the game's permission tests.
+# (The daily "Auto update" job runs the same tests before it writes anything.)
 on:
   push:
     branches: [main]
@@ -18,6 +19,20 @@ jobs:
   tests:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    services:
+      postgres:                                   # a throwaway server, only for these tests
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TEST_PG_ADMIN_URL: postgresql+psycopg2://postgres:postgres@localhost:5432/postgres
     steps:
       - uses: actions/checkout@v4
 
@@ -30,6 +45,7 @@ jobs:
       - name: Install packages
         run: |
           pip install -r pipeline/requirements.txt
+          pip install -r app/requirements.txt          # Streamlit, so the game page's tests run here too
           pip install pyflakes
 
       - name: Static check (undefined names and unused imports, including in the web app that the tests cannot run)

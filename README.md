@@ -19,9 +19,10 @@ A web app that predicts UFC fights **before they happen**, locks each pick with 
 | **What it does** | Picks a winner for every UFC fight, past and upcoming, and shows the reasoning behind each pick |
 | **Best result** | **<!--n:acc_v3-->65.4%<!--/n-->** of <!--n:n_fights-->5,279<!--/n--> fights picked correctly (<!--n:first_year-->2016<!--/n--> to <!--n:last_year-->2026<!--/n-->), every pick made using only data from before that fight. A coin flip is 50% |
 | **Also predicts** | The chance each fight goes the distance, with its own honest backtest and predictions locked before the event |
+| **Friends' game** | A private "beat the model" game: friends pick the winner, method and round before a card and are scored against the model |
 | **Stack** | Python (pandas, scikit-learn), PostgreSQL on Neon, SQL window functions, Streamlit, GitHub Actions |
 | **Automation** | A daily job reads announced cards (Wikipedia), betting lines (The Odds API) and results (Kaggle) |
-| **Safety** | <!--n:n_tests-->85<!--/n--> offline tests run before every scheduled job, a dry-run mode, and a read-only database user behind the public app |
+| **Safety** | <!--n:n_tests-->134<!--/n--> offline tests run before every scheduled job, a dry-run mode, and a read-only database user behind the public app |
 | **Transparency** | Every locked pick and goes-the-distance prediction is also published to a [public, time-stamped log](picks_log/ABOUT.md) in this repository |
 | **Cost** | Free tiers only |
 
@@ -130,6 +131,15 @@ Besides picking a winner, the app estimates the chance that each fight **goes to
 
 The model beats the plain decision rate of the previous three years by **<!--n:dist_gain-->0.0229<!--/n--> log loss per fight** (95% interval <!--n:dist_gain_lo-->0.0179<!--/n--> to <!--n:dist_gain_hi-->0.0278<!--/n-->), was better in <!--n:dist_years_better-->19<!--/n--> of <!--n:dist_years_total-->21<!--/n--> years, and its probabilities were within <!--n:dist_gap-->3.4<!--/n--> points of what happened in every large bucket. I tested richer versions (weight class, age, ratings, striking and grappling styles, gradient boosting) and none helped: the signal is how long these fighters' fights tend to last. Before trusting the result I checked it for leaks the way I did for the winner model: the counts were recomputed by brute force for 300 random fights, and a placebo with the answers shuffled drops to chance (AUC 0.500).
 
+## A game for friends: beat the model
+
+The site has a private game. Friends join with an invite code and pick, for each fight on an upcoming card, the **winner, how it ends and the round**. Picks close at 00:00 UTC on event day, and other players' picks stay hidden until then. Two leaderboards follow once the results are in:
+
+- **Beat the model:** your result minus the model's, on the winner call and on goes-the-distance (a Decision pick means "goes the distance"). +1 if you are right and the model is wrong, -1 if the reverse, 0 otherwise. Copying the model scores exactly 0, so the only way up is to disagree with it and be right.
+- **Points:** winner +1, method +1, round +1.
+
+It is the first feature where the public site writes to the database, so it is built defensively. The game uses its **own database user that can touch only its three tables**; the site's read-only user is deliberately stopped from reading them, so PIN hashes stay private. PINs are stored only as salted scrypt hashes, and wrong PINs and wrong invite codes are throttled in the database, not in the page. Every pick is validated again on the server (the right fighters, a card that is still open, a valid round), and everything shown is HTML-escaped. The permissions are tested against a real Postgres server on every push, an `audit` command checks the live database, and I deliberately broke the key protections (escaping, hidden picks, the cutoff, the lockout) to check that the tests fail when they should. Nothing is wagered, and the only data kept is a nickname, a hashed PIN and the picks.
+
 ## The mistakes it caught
 
 The most useful part of this project was catching results that looked good and were not.
@@ -138,7 +148,8 @@ The most useful part of this project was catching results that looked good and w
 2. **The first-listed fighter won every fight.** A model would have learned "pick fighter 1" and scored a fake 100%. The fighters' slots are randomised, and the model has no intercept, so swapping A and B flips its prediction exactly.
 3. **A +14 point result that was leakage.** Adding the dataset's `ranking` column lifted accuracy on ranked fights from 65.4% to 79.3%, far above anything else I had measured. That was too good to believe (the betting market itself is right about 65 to 67% of the time overall). Retired champion Khabib Nurmagomedov had no ranking in any of his title fights, and Alexander Volkanovski showed as champion in his first UFC fights in 2016. The column was a snapshot of today's rankings, so it encoded who succeeded later. I discarded it. Later, with a different dataset that has genuine pre-event rankings, they added nothing (61.9% against 61.7%).
 4. **An explanation that contradicted itself.** My first "Why this pick?" panel showed an Elo line that pointed at the lower-rated fighter 100% of the time. Elo, strength of opposition and win rate all measure "how good is this fighter", so the fitted model splits the credit between them in ways that look backwards one by one. I measured the problem, merged the overlapping factors (the contradiction rate dropped from 100% to about 2%), and the panel now flags any bar that still opposes every number beside it as a "net effect".
-5. **Claims I had to retract.** I first assumed the dataset had no betting odds. The columns exist but are empty, which is why I went looking for another source. A "reach unknown" flag looked predictive but leaks information (reach is recorded partly based on how long a fighter lasted), so it is out.
+5. **A "read-only" login that could write.** I had checked early on that the public site's database login looked read-only. When I later built an audit for the friends' game, it showed that this login, made in the database host's web console, silently belonged to a built-in role that can read and write every table and create other logins, and could read the private odds table I thought I had hidden. Nothing had gone wrong, but the protection was not there. I replaced it with a login made in plain SQL, wrote an audit that checks the things that matter (extra roles, write access, private tables, creating objects), and run it on a real Postgres server in CI, with the old login's exact setup reproduced as a test.
+6. **Claims I had to retract.** I first assumed the dataset had no betting odds. The columns exist but are empty, which is why I went looking for another source. A "reach unknown" flag looked predictive but leaks information (reach is recorded partly based on how long a fighter lasted), so it is out.
 
 ## How the model evolved
 
@@ -192,8 +203,9 @@ An unattended job that writes to a database needs guardrails, so these are delib
 - **A card that suddenly shrinks is refused**, because that is more likely a parsing problem than real.
 - **Locked picks never change, and anyone can check.** A pick is made before its event and the lock is enforced in code. Each day's new picks and goes-the-distance predictions are also committed to a public log, so the repository history shows when each was made; `python pipeline/pick_log.py verify` reads that history and reports how many were committed before their event. The job also compares every logged row with the database each run and raises an alert if one differs. [What the log does and does not prove](picks_log/ABOUT.md).
 - **Dry-run first.** Every step can run in a mode that reports and writes nothing.
-- **Offline tests run before every scheduled job**, so a broken page reader stops the job before it writes anything. There are <!--n:n_tests-->85<!--/n-->, covering name matching, page parsing, the betting-line maths, that reasons add up to picks, the scoring maths, the pick log and the Discord digest.
-- **Least privilege.** The public app connects with a read-only database user, I confirmed writes are refused, and the private odds table is hidden even from that user. The owner connection string lives only in GitHub's encrypted secrets, and the public app holds only the read-only one.
+- **Offline tests run before every scheduled job**, so a broken page reader stops the job before it writes anything. There are <!--n:n_tests-->134<!--/n-->, covering name matching, page parsing, the betting-line maths, that reasons add up to picks, the scoring maths, the pick log and the Discord digest.
+- **Least privilege, verified rather than assumed.** The public app connects with a dedicated read-only database user made with plain SQL. An audit command checks that it holds no extra roles or powers, cannot write or create anything, and cannot read the private tables (the raw odds, the game's players and picks), and those checks run against a real Postgres server on every push. The owner connection string lives only in GitHub's encrypted secrets, and the public app holds only the read-only one.
+- **The friends' game writes through a locked-down database user** that can reach only its own tables, with the permissions tested on a real Postgres server on every push.
 - **Weekly backups.** The whole database, including the odds history that cannot be re-downloaded, is backed up every week to a private repository as plain CSV. A verifier checks every file against a manifest, and the restore tool never overwrites existing data.
 - **Tests and a static check run on every push** (the badge above), with no secrets, so a broken change is caught before it reaches the daily job.
 - **Anything that needs a person ends the run with a non-zero exit code**, so GitHub emails me.
