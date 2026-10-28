@@ -22,7 +22,7 @@ A web app that predicts UFC fights **before they happen**, locks each pick with 
 | **Friends' game** | A private "beat the model" game: friends pick the winner, method and round before a card and are scored against the model |
 | **Stack** | Python (pandas, scikit-learn), PostgreSQL on Neon, SQL window functions, Streamlit, GitHub Actions |
 | **Automation** | A daily job reads announced cards (Wikipedia), betting lines (The Odds API) and results (Kaggle) |
-| **Safety** | <!--n:n_tests-->134<!--/n--> offline tests run before every scheduled job, a dry-run mode, and a read-only database user behind the public app |
+| **Safety** | <!--n:n_tests-->141<!--/n--> offline tests run before every scheduled job, a dry-run mode, and a read-only database user behind the public app |
 | **Transparency** | Every locked pick and goes-the-distance prediction is also published to a [public, time-stamped log](picks_log/ABOUT.md) in this repository |
 | **Cost** | Free tiers only |
 
@@ -133,7 +133,7 @@ The model beats the plain decision rate of the previous three years by **<!--n:d
 
 ## A game for friends: beat the model
 
-The site has a private game. Friends join with an invite code and pick, for each fight on an upcoming card, the **winner, how it ends and the round**. Picks close at 00:00 UTC on event day, and other players' picks stay hidden until then. Two leaderboards follow once the results are in:
+The site has a private game. Friends join with an invite code and pick, for each fight on the **next card**, the **winner, how it ends and the round**. Picks close at 00:00 UTC on event day (the following card then opens), and other players' picks stay hidden until then. The page is built in the site's own style, and clearing a pick on screen clears it in the database, so what you see is what is saved. Two leaderboards follow once the results are in:
 
 - **Beat the model:** your result minus the model's, on the winner call and on goes-the-distance (a Decision pick means "goes the distance"). +1 if you are right and the model is wrong, -1 if the reverse, 0 otherwise. Copying the model scores exactly 0, so the only way up is to disagree with it and be right.
 - **Points:** winner +1, method +1, round +1.
@@ -203,7 +203,7 @@ An unattended job that writes to a database needs guardrails, so these are delib
 - **A card that suddenly shrinks is refused**, because that is more likely a parsing problem than real.
 - **Locked picks never change, and anyone can check.** A pick is made before its event and the lock is enforced in code. Each day's new picks and goes-the-distance predictions are also committed to a public log, so the repository history shows when each was made; `python pipeline/pick_log.py verify` reads that history and reports how many were committed before their event. The job also compares every logged row with the database each run and raises an alert if one differs. [What the log does and does not prove](picks_log/ABOUT.md).
 - **Dry-run first.** Every step can run in a mode that reports and writes nothing.
-- **Offline tests run before every scheduled job**, so a broken page reader stops the job before it writes anything. There are <!--n:n_tests-->134<!--/n-->, covering name matching, page parsing, the betting-line maths, that reasons add up to picks, the scoring maths, the pick log and the Discord digest.
+- **Offline tests run before every scheduled job**, so a broken page reader stops the job before it writes anything. There are <!--n:n_tests-->141<!--/n-->, covering name matching, page parsing, the betting-line maths, that reasons add up to picks, the scoring maths, the pick log and the Discord digest.
 - **Least privilege, verified rather than assumed.** The public app connects with a dedicated read-only database user made with plain SQL. An audit command checks that it holds no extra roles or powers, cannot write or create anything, and cannot read the private tables (the raw odds, the game's players and picks), and those checks run against a real Postgres server on every push. The owner connection string lives only in GitHub's encrypted secrets, and the public app holds only the read-only one.
 - **The friends' game writes through a locked-down database user** that can reach only its own tables, with the permissions tested on a real Postgres server on every push.
 - **Weekly backups.** The whole database, including the odds history that cannot be re-downloaded, is backed up every week to a private repository as plain CSV. A verifier checks every file against a manifest, and the restore tool never overwrites existing data.

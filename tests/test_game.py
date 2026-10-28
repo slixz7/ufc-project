@@ -106,6 +106,13 @@ def test_the_scores_match_a_hand_calculation():
     assert lb.nickname.tolist() == ["Pat", "Sam"] and lb.points.tolist() == [6, 0] and lb.vs_model.tolist() == [3, 0] and lb.picks.tolist() == [3, 2]
 
 
+def test_the_scored_rows_carry_what_was_picked_and_what_happened():
+    s = core.score_picks(*_scoring_fixture()).set_index(["nickname", "bout_id"])
+    row = s.loc[("Pat", "b1")]
+    assert (row.fighter_a, row.fighter_b, row.pick_method, row.pick_round, row.actual_method, row.finish_round) == ("A1", "B1", "KO/TKO", 2, "KO/TKO", 2)
+    assert s.loc[("Pat", "b2")].actual_method == "Decision" and pd.isna(s.loc[("Pat", "b2")].finish_round) and pd.isna(s.loc[("Pat", "b2")].pick_round)
+
+
 def test_copying_the_model_earns_exactly_nothing_versus_the_model():
     picks, bouts, results, model, dist = _scoring_fixture()
     mw = dict(zip(model.bout_id, model.model_winner))
@@ -222,6 +229,18 @@ def test_a_pick_is_saved_changed_and_validated_again_on_the_server(db):
     assert "closed" in game_db.save_pick(db, p["player_id"], BOUT, "Alex One", "KO/TKO", 1, datetime(2026, 10, 31, tzinfo=timezone.utc))
     assert "no longer on the card" in game_db.save_pick(db, p["player_id"], {**BOUT, "status": "cancelled"}, "Alex One", "KO/TKO", 1, T0)
     assert game_db.save_pick(db, "forged-id", BOUT, "Alex One", "KO/TKO", 1, T0) == "Please sign in again."      # a made-up player cannot write picks
+
+
+def test_a_pick_can_be_removed_only_by_its_owner_and_only_while_the_card_is_open(db):
+    a, b = _join(db, "Pat"), _join(db, "Sam", "654321")
+    for p in (a, b):
+        game_db.save_pick(db, p["player_id"], BOUT, "Alex One", "KO/TKO", 1, T0)
+    assert game_db.delete_pick(db, a["player_id"], BOUT, T0 + timedelta(hours=1)) is None
+    assert game_db.all_picks(db).nickname.tolist() == ["Sam"]                                                     # only Pat's pick went; Sam's is untouched
+    assert game_db.delete_pick(db, a["player_id"], BOUT, T0) is None                                              # removing what is not there is harmless
+    assert "closed" in game_db.delete_pick(db, b["player_id"], BOUT, datetime(2026, 10, 31, tzinfo=timezone.utc))   # too late: the pick stands
+    assert "no longer on the card" in game_db.delete_pick(db, b["player_id"], {**BOUT, "status": "cancelled"}, T0)
+    assert game_db.all_picks(db).nickname.tolist() == ["Sam"]
 
 
 def test_picks_can_be_read_back_and_an_account_can_be_deleted_with_its_picks(db):

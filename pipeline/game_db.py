@@ -142,6 +142,17 @@ def save_pick(engine, player_id: str, bout: dict, winner, method, rnd, now: date
     return None
 
 
+def delete_pick(engine, player_id: str, bout: dict, now: datetime) -> str | None:
+    """Remove a pick (what you see is what is saved: clearing a fight on the page clears it here). Only while the card is still open."""
+    if bout.get("status") != "scheduled":
+        return "That bout is no longer on the card."
+    if not core.picks_open(bout["event_date"], now):
+        return "Picks for this card have closed."
+    with engine.begin() as conn:
+        conn.execute(sa.text("DELETE FROM game_picks WHERE player_id = :p AND bout_id = :b"), {"p": player_id, "b": bout["bout_id"]})
+    return None
+
+
 def my_picks(engine, player_id: str) -> pd.DataFrame:
     return pd.read_sql(sa.text("SELECT bout_id, pick_name, pick_method, pick_round, updated_at FROM game_picks WHERE player_id = :p"), engine, params={"p": player_id})
 

@@ -128,8 +128,8 @@ def validate_pick(bout: dict, winner, method, rnd, now: datetime) -> tuple[str |
 # ----------------------------------------------------------------------------------------------
 # scoring
 # ----------------------------------------------------------------------------------------------
-SCORED_COLUMNS = ["player_id", "nickname", "bout_id", "event_name", "event_date", "pick_name", "winner", "winner_ok", "method_ok", "round_ok", "points",
-                  "model_winner", "vs_winner", "vs_distance", "vs_model"]
+SCORED_COLUMNS = ["player_id", "nickname", "bout_id", "event_name", "event_date", "fighter_a", "fighter_b", "pick_name", "pick_method", "pick_round", "winner", "actual_method",
+                  "finish_round", "winner_ok", "method_ok", "round_ok", "points", "model_winner", "vs_winner", "vs_distance", "vs_model"]
 
 
 def score_picks(picks: pd.DataFrame, bouts: pd.DataFrame, results: pd.DataFrame, model_winners: pd.DataFrame, distance: pd.DataFrame) -> pd.DataFrame:
