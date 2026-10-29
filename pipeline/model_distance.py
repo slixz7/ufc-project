@@ -16,7 +16,8 @@ Honest test (see `scoring`): trained and scored year by year, it beat the plain 
     python pipeline/model_distance.py scoring               # the report: log loss, calibration, year by year
 
 Scheduled rounds of upcoming bouts are not on the cards, so a title fight or main event is taken to be five rounds and anything else
-three (historically 84% of title fights and 5% of other fights had five).
+three (since 2002, 84% of the fights the source flags as "title" had five rounds, the rest being tournament finals such as The Ultimate Fighter and
+Road to UFC, which the source flags the same way; 5% of other fights had five). See title_rules.py.
 """
 from __future__ import annotations
 

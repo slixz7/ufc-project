@@ -17,6 +17,7 @@ This is the hands-on guide: what each piece does, the commands to run it, and th
 | **Model v3** | `pipeline/model_v3.py`, `sql/model_v3.sql` | v2 plus the betting market |
 | **Automation** | `pipeline/auto_update.py` (entry point) and `pipeline/auto_*.py` (see below), `.github/workflows/auto-update.yml` | Daily job: cards, lines, picks, results, odds history |
 | **Goes the distance** | `pipeline/model_distance.py`, `pipeline/distance_scores.py`, `app/distance_ui.py` | The chance each fight goes to a decision: backtest, locked predictions for upcoming bouts, grading, and its display |
+| **Title fights** | `pipeline/title_rules.py` | Decides what counts as a championship fight: the source also flags tournament bouts (Ultimate Fighter and Road to UFC finals) as "title" fights, so the Past events page tags only five-round flagged fights as Title and the rest as Tournament |
 | **Read-only login** | `pipeline/db_roles.py` | Creates and audits the website's read-only database login, and retires an over-powered old one |
 | **Friends' game** | `app/game_ui.py`, `pipeline/game_core.py`, `game_db.py`, `game_admin.py`, `bout_results.py` | A private "beat the model" game on the site's Game page, with its own locked-down database user |
 | **Backups** | `pipeline/backup.py`, `.github/workflows/backup.yml` | Weekly CSV backup of every table to a private repository, with a verifier and a safe restore |

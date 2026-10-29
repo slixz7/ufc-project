@@ -106,6 +106,25 @@ def test_the_scores_match_a_hand_calculation():
     assert lb.nickname.tolist() == ["Pat", "Sam"] and lb.points.tolist() == [6, 0] and lb.vs_model.tolist() == [3, 0] and lb.picks.tolist() == [3, 2]
 
 
+def test_without_a_connection_string_the_scripts_say_what_to_do_instead_of_a_wall_of_errors(monkeypatch, tmp_path):
+    import model_v2
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setattr(model_v2, "DEFAULT_DB_URL", "postgresql+psycopg2://nobody:x@127.0.0.1:1/none")             # nothing is listening there
+    with pytest.raises(SystemExit) as stop:
+        model_v2.make_engine()
+    message = str(stop.value)
+    assert "No database connection string is loaded" in message and '$env:DATABASE_URL = "paste-your-string-here"' in message and "Traceback" not in message
+    monkeypatch.setattr(model_v2, "DEFAULT_DB_URL", f"sqlite:///{tmp_path / 'local.db'}")                          # a database that IS there (the original local setup) still works
+    assert model_v2.make_engine().url.drivername == "sqlite"
+
+
+def test_a_connection_string_that_is_loaded_is_used_as_given_and_never_second_guessed(monkeypatch):
+    import model_v2
+    monkeypatch.setenv("DATABASE_URL", "postgres://someone:secret@127.0.0.1:1/neondb?sslmode=require")           # unreachable, but explicit: no probe, no message
+    engine = model_v2.make_engine()
+    assert engine.url.drivername == "postgresql+psycopg2" and engine.url.host == "127.0.0.1"
+
+
 def test_the_scored_rows_carry_what_was_picked_and_what_happened():
     s = core.score_picks(*_scoring_fixture()).set_index(["nickname", "bout_id"])
     row = s.loc[("Pat", "b1")]

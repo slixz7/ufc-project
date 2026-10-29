@@ -29,6 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "pipeline"))    
 import distance_scores  # noqa: E402
 from distance_ui import line_html as dist_line_html, section_html as dist_section_html  # noqa: E402
 import game_ui  # noqa: E402
+import title_rules  # noqa: E402
 
 st.set_page_config(page_title="UFC Fight Predictor", page_icon="🥊", layout="wide", initial_sidebar_state="collapsed")
 
@@ -756,7 +757,8 @@ def page_past():
     row = sub.iloc[labels.index(choice)]
     p3_src = "fight_picks_v3" if has_v3() else NO_V3_PAST
     fights = q(f"""
-        SELECT f.weight_class, f.title_fight, w.fighter_name AS winner, l.fighter_name AS loser, f.result,
+        SELECT f.weight_class, {title_rules.championship_sql()} AS championship, {title_rules.tournament_sql()} AS tournament,
+               w.fighter_name AS winner, l.fighter_name AS loser, f.result,
                f.finish_round, f.finish_time, f.fight_url AS fight_url, p.fighter_a AS pa, p.fighter_b AS pb,
                COALESCE(p3.predicted_winner, p.predicted_winner) AS predicted_winner, COALESCE(p3.confidence, p.confidence) AS confidence,
                CASE WHEN p3.fight_url IS NOT NULL THEN p3.correct ELSE p.correct END AS correct, p.tier, p.method,
@@ -767,7 +769,7 @@ def page_past():
         LEFT JOIN fight_picks_v2 p ON p.fight_url = f.fight_url
         LEFT JOIN {p3_src} p3 ON p3.fight_url = f.fight_url
         WHERE f.event_name = :e AND f.event_date = :d
-        ORDER BY f.title_fight DESC, f.fight_url""", {"e": row.event_name, "d": row.event_date.date()})
+        ORDER BY {title_rules.order_sql()}, f.fight_url""", {"e": row.event_name, "d": row.event_date.date()})
     first_model = q("SELECT MIN(event_date) AS d FROM fight_picks_v2 WHERE method = 'model'").iloc[0, 0]
     REASONS.clear()
     if has_fight_reasons():
@@ -778,7 +780,7 @@ def page_past():
     model_fact = f'<span>Model: <b>{int(scored.correct.sum())} of {len(scored)}</b> right</span>' if len(scored) else ""
     body = []
     for r in fights.itertuples():
-        title = ' <span class="tag">Title</span>' if r.title_fight else ""
+        title = ' <span class="tag">Title</span>' if r.championship else (' <span class="tag">Tournament</span>' if r.tournament else "")
         if isnull(r.correct):
             model = '<span class="muted small">no pick stored yet</span>'
         else:

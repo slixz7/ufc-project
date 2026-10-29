@@ -59,12 +59,30 @@ STATS = ["sig_land", "sig_att", "sig_absorbed", "td_land", "td_att", "opp_td_lan
          "ctrl_sec", "dist_att", "clinch_att", "ground_att"]
 
 
+NO_CONNECTION_MESSAGE = """No database connection string is loaded in this window, and there is no database on this computer to fall back on.
+
+Load yours first (Neon: Connect, pick the role, turn pooling off, Copy snippet), then run the command again:
+    PowerShell:   $env:DATABASE_URL = "paste-your-string-here"
+                  cls
+    Mac or Linux: export DATABASE_URL="paste-your-string-here"
+A string loaded in one window is gone when you open a new one. Never paste the string into a chat or commit it."""
+
+
 def make_engine():
-    url = os.getenv("DATABASE_URL", DEFAULT_DB_URL)
+    """The database engine. With DATABASE_URL set it is used as given. Without it the scripts try a database on this computer (the original
+    local setup); if there is none, say plainly what to do instead of printing a long connection error."""
+    explicit = os.getenv("DATABASE_URL")
+    url = explicit or DEFAULT_DB_URL
     for prefix in ("postgres://", "postgresql://"):
         if url.startswith(prefix):
             url = "postgresql+psycopg2://" + url[len(prefix):]
-    return sa.create_engine(url)
+    engine = sa.create_engine(url)
+    if not explicit:
+        try:
+            engine.connect().close()
+        except sa.exc.OperationalError:
+            raise SystemExit(NO_CONNECTION_MESSAGE) from None
+    return engine
 
 
 def norm(name: str) -> str:
