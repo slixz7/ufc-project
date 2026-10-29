@@ -13,6 +13,7 @@ import requests
 import sqlalchemy as sa
 
 import game_core
+import model_distance_v2
 import model_v3
 from auto_common import Report, UA
 from auto_names import _pair_sim, name_sim
@@ -342,7 +343,7 @@ def step_refresh_odds(engine, today: date, rep: Report, dry_run: bool, workdir: 
         rep.add("Historical odds refresh", "Only runs on Mondays.")
         return
     if dry_run:
-        rep.add("Historical odds refresh", "Would clone the odds dataset, reload it, and extend the v3 backtest.")
+        rep.add("Historical odds refresh", "Would clone the odds dataset, reload it, and extend the v3 and market-informed goes-the-distance backtests.")
         return
     dest = workdir / "nlbair"
     if dest.exists():
@@ -354,4 +355,7 @@ def step_refresh_odds(engine, today: date, rep: Report, dry_run: bool, workdir: 
         rc = model_v3.main(argv)
         if rc not in (0, None):
             raise RuntimeError(f"model_v3 {argv[0]} returned {rc}")
-    rep.add("Historical odds refresh", "reloaded the odds dataset and extended the v3 backtest")
+    rc = model_distance_v2.main(["backtest"])                 # the new lines let more past fights be scored with the market-informed goes-the-distance model
+    if rc not in (0, None):
+        raise RuntimeError(f"model_distance_v2 backtest returned {rc}")
+    rep.add("Historical odds refresh", "reloaded the odds dataset and extended the v3 and market-informed goes-the-distance backtests")

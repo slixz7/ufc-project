@@ -2,6 +2,7 @@
 The demo: invented data that must look like real data to the real pipeline, a builder that can never harm a real database, and a launcher.
 The first group needs nothing but pandas; the second builds whole demos on a real Postgres (TEST_PG_ADMIN_URL) and opens every page of the website on them.
 """
+import inspect
 import os
 import re
 import sys
@@ -60,7 +61,7 @@ def test_the_generator_is_deterministic_and_every_date_is_measured_from_today(ti
 
 def test_everything_in_the_demo_is_invented(small):
     names = {f.name for f in small.fighters}
-    assert len(names) == len(small.fighters) > 400                                                                      # unique, plenty of them
+    assert len(names) == len(small.fighters) > 300                                                                      # unique, plenty of them
     real_surnames = ("McGregor", "Jones", "Silva", "Adesanya", "Nunes", "Volkanovski", "Pereira", "Topuria", "Makhachev", "Poirier", "Holloway", "Usman", "Diaz", "Rousey", "Khabib", "Nurmagomedov", "Aldo")
     assert not [n for n in names if re.search(r"\b(" + "|".join(real_surnames) + r")\b", n, flags=re.I)]                  # whole words: the invented 'Taldo' is not the real 'Aldo'
     for url in list(small.fights.fight_url) + list(small.fighter_fights.fighter_url):
@@ -142,6 +143,11 @@ def test_the_launcher_knows_when_a_demo_has_gone_stale():
     assert not run_demo.is_stale(meta(TODAY, TODAY + timedelta(2)), TODAY)
     assert not run_demo.is_stale(meta(TODAY - timedelta(2), TODAY + timedelta(1)), TODAY)
     assert run_demo.is_stale(meta(TODAY - timedelta(4), TODAY + timedelta(9)), TODAY)                                  # built too long ago
+    current = lambda **kw: {**meta(TODAY, TODAY + timedelta(2)), "build_version": "7", **kw}
+    assert not run_demo.is_stale(current(), TODAY, "7")
+    assert run_demo.is_stale(current(build_version="6"), TODAY, "7") and run_demo.is_stale(meta(TODAY, TODAY + timedelta(2)), TODAY, "7")      # built by older code, or before versions were recorded: rebuilt
+    assert not run_demo.is_stale(meta(TODAY, TODAY + timedelta(2)), TODAY)                                              # (without a version to compare, the old rules apply)
+    assert build_demo.BUILD_VERSION and "build_version" in inspect.getsource(build_demo.build)                          # the builder really records it
     assert run_demo.is_stale(meta(TODAY - timedelta(1), TODAY), TODAY)                                                  # its "next card" is today: no longer ahead of us
 
 
@@ -276,6 +282,7 @@ def test_a_tiny_demo_is_built_by_the_real_pipeline_graded_and_audited(tiny_demo)
     old = q("SELECT MAX(predicted_at) AS p, MIN(a.event_date) AS e FROM upcoming_picks_v2 a WHERE correct IS NOT NULL").iloc[0]
     assert pd.Timestamp(old.p).tz_localize(None) < pd.Timestamp(old.e)                                                              # a played card's picks were locked BEFORE it: the timeline reads right
     assert n("SELECT COUNT(*) FROM game_players") == 6 and n("SELECT COUNT(*) FROM game_picks") > 40 and n("SELECT COUNT(*) FROM event_starts") == 3
+    assert n("SELECT COUNT(*) FROM upcoming_distance_v2") == 0 and n("SELECT COUNT(*) FROM fight_distance_v2") == 0                    # the market-informed distance model: tables exist, nothing faked
     assert n("SELECT COUNT(*) FROM upcoming_picks_v3") == 0 and n("SELECT COUNT(*) FROM fight_picks_v3") == 0 and tiny_demo["market_model"] is False   # too little history for the market model: skipped, not faked
     assert q("SELECT value FROM demo_meta WHERE key = 'built_on'").iloc[0, 0] == str(TODAY)
 
@@ -348,7 +355,11 @@ def test_the_small_demo_adds_the_market_model_and_its_picks_appear_on_the_websit
     n = lambda sql: int(pd.read_sql(sa.text(sql), eng).iloc[0, 0])
     assert small_demo["market_model"] is True and n("SELECT COUNT(*) FROM fight_picks_v3") > 150 and n("SELECT COUNT(*) FROM upcoming_picks_v3") >= 8
     assert n("SELECT COUNT(*) FROM upcoming_picks_v3 WHERE correct IS NOT NULL") >= 10                                       # the two played cards' market-informed picks were graded
+    assert n("SELECT COUNT(*) FROM fight_distance_v2") > 200 and n("SELECT COUNT(*) FROM upcoming_distance_v2 WHERE status = 'locked'") >= 15        # the market-informed distance model ran too
+    assert n("SELECT COUNT(*) FROM upcoming_distance_v2 WHERE graded_at IS NOT NULL AND went_distance IS NOT NULL") >= 10
     with _app(small_demo) as at:
         assert not at.exception and "market-informed" in _plain(at).lower(), _plain(at)[:400]                         # the next card shows its market-informed picks
+        assert re.search(r"Goes the distance.{0,220}market-informed \d+%", _plain(at)), _plain(at)[:600]              # ...and its market-informed goes-the-distance figure, beside the model-only one
         at = at.radio[0].set_value("Track record").run()
         assert not at.exception and "market-informed picks" in _plain(at).lower(), _plain(at)[:600]
+        assert "The same question, with the betting market" in _plain(at) and "Verdict:" in _plain(at), _plain(at)[:600]

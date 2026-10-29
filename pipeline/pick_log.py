@@ -1,8 +1,9 @@
 """
 The public pick log.
 
-Every locked pick is appended to picks_log/locked_picks.csv, and every locked goes-the-distance prediction to
-picks_log/locked_distance.csv, by the daily GitHub job, which then commits the files. The repository's history is therefore a
+Every locked pick is appended to picks_log/locked_picks.csv, every locked goes-the-distance prediction to
+picks_log/locked_distance.csv, and every locked market-informed goes-the-distance prediction to picks_log/locked_distance_market.csv,
+by the daily GitHub job, which then commits the files. The repository's history is therefore a
 public, time-stamped record of when each was made: one that was committed before its event cannot have been chosen after the result.
 
   python pipeline/pick_log.py verify      # read the git history and report when each logged pick and prediction first appeared
@@ -28,6 +29,9 @@ COLUMNS = ["pick_type", "bout_id", "event_date", "event_name", "fighter_a", "fig
            "locked_at_utc", "logged_at_utc"]
 DIST_PATH = ROOT / "picks_log" / "locked_distance.csv"
 DIST_REL = "picks_log/locked_distance.csv"
+DIST2_PATH = ROOT / "picks_log" / "locked_distance_market.csv"
+DIST2_REL = "picks_log/locked_distance_market.csv"
+DIST2_TABLE = "upcoming_distance_v2"
 DIST_COLUMNS = ["bout_id", "event_date", "event_name", "fighter_a", "fighter_b", "scheduled_rounds", "p_distance", "locked_at_utc", "logged_at_utc"]
 TYPES = {"model-only": "upcoming_picks_v2", "market-informed": "upcoming_picks_v3"}
 PROB_TOLERANCE = 0.00051          # probabilities are written with 4 decimals
@@ -62,12 +66,12 @@ def collect(engine) -> pd.DataFrame:
     return d.sort_values(["event_date", "bout_order", "pick_type"]).reset_index(drop=True)
 
 
-def collect_distance(engine) -> pd.DataFrame:
-    """Every goes-the-distance prediction in the database, in card order (cancelled bouts stay: a prediction that was made is part of the record)."""
-    if not _has_table(engine, "upcoming_distance_v1"):
+def collect_distance(engine, table: str = "upcoming_distance_v1") -> pd.DataFrame:
+    """Every goes-the-distance prediction in `table` (v1's, or the market-informed v2's), in card order (cancelled bouts stay: a prediction that was made is part of the record)."""
+    if not _has_table(engine, table):
         return pd.DataFrame(columns=DIST_COLUMNS + ["bout_order"])
     d = pd.read_sql(sa.text("SELECT bout_id, event_date, event_name, bout_order, fighter_a, fighter_b, scheduled_rounds, p_distance, predicted_at "
-                            "FROM upcoming_distance_v1"), engine)
+                            f"FROM {table}"), engine)
     d["event_date"] = pd.to_datetime(d.event_date).dt.strftime("%Y-%m-%d")
     d["p_distance"] = d.p_distance.astype(float).round(4)
     d["scheduled_rounds"] = d.scheduled_rounds.astype(int)
@@ -147,11 +151,13 @@ def should_write(args) -> bool:
 
 
 def step_pick_log(engine, today: date, rep, dry_run: bool, write: bool, path: Path = LOG_PATH, now: datetime | None = None,
-                  dist_path: Path = DIST_PATH) -> None:
+                  dist_path: Path = DIST_PATH, dist2_path: Path | None = None) -> None:
+    dist2_path = Path(dist2_path) if dist2_path is not None else Path(dist_path).with_name(DIST2_PATH.name)      # beside the other distance log, wherever that is
     lines = []
     for kind, collected, existing, fresh, bad, appender, dest in (
             ("pick", collect(engine), read_log(path), None, None, append, path),
-            ("goes-the-distance prediction", collect_distance(engine), read_log(dist_path, DIST_COLUMNS), None, None, append_distance, dist_path)):
+            ("goes-the-distance prediction", collect_distance(engine), read_log(dist_path, DIST_COLUMNS), None, None, append_distance, dist_path),
+            ("market-informed goes-the-distance prediction", collect_distance(engine, DIST2_TABLE), read_log(dist2_path, DIST_COLUMNS), None, None, append_distance, dist2_path)):
         if kind == "pick":
             fresh, bad = new_rows(collected, existing), changed_rows(collected, existing)
         else:
@@ -229,6 +235,7 @@ def main(argv=None) -> int:
         return 2
     print("PICKS (winner picks)\n" + verify_report())
     print("\nGOES-THE-DISTANCE PREDICTIONS\n" + verify_report(log=DIST_REL, key_cols=("bout_id",), noun="goes-the-distance predictions"))
+    print("\nMARKET-INFORMED GOES-THE-DISTANCE PREDICTIONS\n" + verify_report(log=DIST2_REL, key_cols=("bout_id",), noun="market-informed goes-the-distance predictions"))
     return 0
 
 

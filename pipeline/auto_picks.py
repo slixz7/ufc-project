@@ -6,6 +6,7 @@ from datetime import date, timedelta
 import sqlalchemy as sa
 
 import model_distance
+import model_distance_v2
 import model_v2
 import model_v3
 from auto_common import Report
@@ -53,6 +54,10 @@ def step_lock(engine, today: date, rep: Report, dry_run: bool, lock_days: int) -
         raise RuntimeError(f"model_v3 predict returned {rc}")
     if not dry_run:
         model_v3.main(["explain"])           # fills in any missing "Why this pick?" reasons (never blocks a pick)
+    rc3 = model_distance_v2.main(["predict", "--today", today.isoformat(), "--within-days", str(lock_days)] + (["--dry-run"] if dry_run else []))
+    rep.add("Market-informed goes-the-distance predictions", f"events within {lock_days} days are locked with the latest line; model_distance_v2 predict returned {rc3}")
+    if rc3 not in (0, None):
+        raise RuntimeError(f"model_distance_v2 predict returned {rc3}")
     with engine.connect() as conn:
         soon = conn.execute(sa.text("""SELECT COUNT(*) FROM upcoming_fights u LEFT JOIN upcoming_odds o USING (bout_id)
                                        WHERE u.status = 'scheduled' AND u.event_date > :t AND u.event_date <= :lim AND o.bout_id IS NULL"""),

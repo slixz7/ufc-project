@@ -45,6 +45,7 @@ from pathlib import Path
 
 import digest
 import model_distance
+import model_distance_v2
 import model_v2
 import model_v3
 import pick_log
@@ -129,6 +130,7 @@ __all__ = [
     "match_line_to_bout",
     "MAX_SHRINK",
     "model_distance",
+    "model_distance_v2",
     "model_v2",
     "model_v3",
     "name_sim",

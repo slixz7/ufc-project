@@ -23,6 +23,7 @@ The first run takes about a minute while it builds; after that it starts in seco
 | Winner model | `model_v2.py`: a walk-forward pick for every past fight, each using only earlier fights |
 | Betting-market model | `model_v3.py`: loads the historical lines, backtests, blends model and market |
 | Goes-the-distance model | `model_distance.py` |
+| Goes-the-distance with the betting market | `model_distance_v2.py`: the same question with the favourite's strength from the line, locked beside the first |
 | Locking and grading | `upcoming.py` and each model's `predict` and `grade`, replayed on two cards that "have already happened" |
 | The record | `bout_results.py`, the "Why this pick?" reasons, the Track record page |
 | The friends' game | The real game tables, scoring and page, with six fictional players |
@@ -33,6 +34,8 @@ So the demo is not a mock-up with screenshots; it is the project, running on mad
 ## Why made-up data, and what its numbers mean
 
 Real fight data comes with licensing and terms-of-use questions that a public repository should not carry. The demo needs nothing from the outside world: no Kaggle, no odds feed, no hosted database.
+
+**One more thing the generator does on purpose:** fights between very unequal fighters end in a finish more often, as heavy favourites do in real fights, so the market-informed distance prediction has something to find. At the demo's size the improvement is too small to confirm, which is true of the real thing too.
 
 **Please do not read the demo's accuracy as the project's accuracy.** The generator was set up so the demo resembles the real project's ranges (a winner model around 60%, an opening line around 65%, a market that is a little sharper than the statistics), so that the pages look like the real thing. That says nothing about how well the real models predict real fights. For that, see the [README's results](../README.md#results-honestly) and the public, time-stamped [pick log](../picks_log/ABOUT.md).
 

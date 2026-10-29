@@ -16,6 +16,7 @@ This is the hands-on guide: what each piece does, the commands to run it, and th
 | **Model v2** | `pipeline/model_v2.py`, `sql/model_v2.sql` | The statistical model: a pick for every fight, past and upcoming |
 | **Model v3** | `pipeline/model_v3.py`, `sql/model_v3.sql` | v2 plus the betting market |
 | **Automation** | `pipeline/auto_update.py` (entry point) and `pipeline/auto_*.py` (see below), `.github/workflows/auto-update.yml` | Daily job: cards, lines, picks, results, odds history |
+| **Goes the distance, with the betting market** | `pipeline/model_distance_v2.py` (and `pipeline/experiment_distance_market.py`, the test that justified it) | The same question with the favourite's strength from the betting line, added alongside the one below: backtest, locked predictions once a line exists, grading |
 | **Goes the distance** | `pipeline/model_distance.py`, `pipeline/distance_scores.py`, `app/distance_ui.py` | The chance each fight goes to a decision: backtest, locked predictions for upcoming bouts, grading, and its display |
 | **Title fights** | `pipeline/title_rules.py` | Decides what counts as a championship fight: the source also flags tournament bouts (Ultimate Fighter and Road to UFC finals) as "title" fights, so the Past events page tags only five-round flagged fights as Title and the rest as Tournament |
 | **Read-only login** | `pipeline/db_roles.py` | Creates and audits the website's read-only database login, and retires an over-powered old one |
@@ -67,6 +68,15 @@ All database commands below need a PostgreSQL database (a free hosted one such a
    python pipeline/model_distance.py predict     # lock a prediction for every announced upcoming bout
    python pipeline/model_distance.py grade       # after the results are in the dataset
    python pipeline/model_distance.py scoring     # the report behind the README section and the Track record page
+   ```
+   **Goes the distance, with the betting market** (needs the winner model's lines loaded, `model_v3.py load-odds`, and the distance backtest above; the daily job then keeps it going):
+   ```
+   python pipeline/model_distance_v2.py setup       # create its two tables
+   python pipeline/model_distance_v2.py backtest    # a market-informed prediction for every past fight that has a line (seconds)
+   python pipeline/model_distance_v2.py predict     # lock one for every bout that has a line and a model-only prediction (the daily job does this near the event)
+   python pipeline/model_distance_v2.py grade       # after the results are in the dataset
+   python pipeline/model_distance_v2.py scoring     # the report, against the model-only prediction on the same fights
+   python pipeline/readme_numbers.py update         # fills the README's market-informed numbers from the backtest
    ```
    By hand for one card (the daily job does this for you): write `fighter_a,fighter_b,odds_a,odds_b` (American odds, names as on the card), then
    ```
@@ -174,6 +184,14 @@ Running it:
 - **The demo's database lives in your system's cache folder, never in the project** (a database inside OneDrive gets damaged by the syncing). `--data-dir` or `UFC_DEMO_DIR` changes it; deleting the folder removes the demo.
 - **A model change that needs more history** (for example a larger minimum for the market model) may need a bigger `normal` size in `synth.py`; the builder skips the market model, and says so, when the history is too short for it.
 
+## Experiments
+
+An experiment is a read-only script that answers one question and states, in its own header, the rule for what counts as a yes, written before any real result was seen. It writes nothing to the database or the site.
+
+- `python pipeline/experiment_distance_market.py` asks whether the opening betting line adds anything to the goes-the-distance model, beyond what that model already knows. It needs `DATABASE_URL`, the distance backtest (`model_distance.py backtest`) and the historical lines (`model_v3.py load-odds`) already in place, and it prints a report ending in `VERDICT: ADOPT` or `VERDICT: DROP`.
+- **Either way, the result goes in the README.** A DROP is recorded like the other retired ideas; an ADOPT is only the start: the feature is then built properly, with tests, and still has to earn its place on live fights.
+- To ask for help with a result, paste the whole printed report, not just the verdict.
+
 ## Backups
 
 `.github/workflows/backup.yml` runs every Sunday (and on demand), dumps every table except the rebuildable `fight_reasons` cache to plain CSV in a stable order, checks the files against `MANIFEST.csv`, and commits them to a **private** repository named `ufc-project-backups`. A week with no new data produces identical files and no commit.
@@ -189,11 +207,13 @@ The token expires: put the date in your calendar. An expired token makes the wee
 
 On your own computer: `python pipeline/backup.py dump` (writes to `data/backup`, which git ignores), `python pipeline/backup.py verify data/backup` (needs no database).
 
-To restore: clone `ufc-project-backups`, create the empty tables with the project's setup commands (`model_v2.py setup`, `model_v3.py setup`, `model_distance.py setup`; the odds history table is created by the odds step's first real run, or by `python -c "import sys; sys.path.insert(0, 'pipeline'); import auto_update, model_v2; auto_update.ensure_snapshot_tables(model_v2.make_engine())"`), then run `python pipeline/backup.py restore PATH_TO_CLONE/data --table odds_snapshots` for each table you need. Restore only loads into an empty table, refuses a damaged file, and never deletes. Tables that can be rebuilt (`fights`, the backtests, the reasons) are quicker to rebuild with their own commands. A blank cell comes back as NULL.
+To restore: clone `ufc-project-backups`, create the empty tables with the project's setup commands (`model_v2.py setup`, `model_v3.py setup`, `model_distance.py setup`, `model_distance_v2.py setup`; the odds history table is created by the odds step's first real run, or by `python -c "import sys; sys.path.insert(0, 'pipeline'); import auto_update, model_v2; auto_update.ensure_snapshot_tables(model_v2.make_engine())"`), then run `python pipeline/backup.py restore PATH_TO_CLONE/data --table odds_snapshots` for each table you need. Restore only loads into an empty table, refuses a damaged file, and never deletes. Tables that can be rebuilt (`fights`, the backtests, the reasons) are quicker to rebuild with their own commands. A blank cell comes back as NULL.
 
 ## Goes the distance
 
 The model estimates the chance a fight ends in a decision from how long each fighter's earlier fights lasted (share of scheduled time used, decision rate, how often they won or lost by a finish) plus title or five rounds. Fights since 2002 with 3 or 5 scheduled rounds are used; disqualifications are left out. Scheduled rounds are not on the cards, so a title fight or main event is taken to be five rounds. Predictions are locked when a bout is announced (with the winner picks), never change, and are graded when the dataset has the result. The daily job runs `predict` in the v2 step and `grade` plus `backtest` with the results. `python pipeline/export_history.py` saves the history the models read to `data/history_export.csv` (read-only; not committed).
+
+The market-informed version (`model_distance_v2.py`) keeps this model's prediction and adds the favourite's strength from the betting line (the favourite's chance above 50%, and its square) in a small second stage fitted on earlier fights only. It was added on a narrow pass of the rule in `experiment_distance_market.py`, so it runs **alongside** the model-only prediction and never replaces it: the website shows the model-only figure as the headline and the market-informed one beside it, and both are scored on the same fights. The daily job locks it in the same step as the market-informed winner picks (`step_lock`: within the lock window, using the latest line, once, never changed), grades it with the results, and extends its backtest after the Monday odds refresh. The friends' game still uses the model-only prediction. If the live record ever shows it is not helping, stop calling it in `step_lock` and leave the tables in place: nothing else depends on it.
 
 ## README numbers
 

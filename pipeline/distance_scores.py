@@ -67,3 +67,23 @@ def distance_scores(d: pd.DataFrame, min_year_fights: int = 50) -> dict:
             "calibration": cal, "max_gap": max([abs(c["predicted"] - c["actual"]) for c in cal if c["n"] >= 150] or [0.0]),
             "gain_by_year": {int(k): float(v) for k, v in gain.gain.items()}, "years_better": int((gain.gain > 0).sum()), "years_total": int(len(gain)),
             "tiers": tiers, "first_year": int(d._year.min()), "last_year": int(d._year.max())}
+
+
+def pair_summary(d: pd.DataFrame, new: str, ref: str) -> dict:
+    """Fights, how often they went the distance, and each prediction's average log loss on those same fights."""
+    y = d.went_distance.astype(float).to_numpy()
+    return {"n": len(d), "rate": float(y.mean()), "new": float(_loss(y, d[new].to_numpy()).mean()), "ref": float(_loss(y, d[ref].to_numpy()).mean())}
+
+
+def paired_vs(d: pd.DataFrame, new: str, ref: str) -> dict:
+    """The per-fight log-loss difference between two predictions on the SAME fights (new minus ref; negative means `new` is better), with a 95% range."""
+    y = d.went_distance.astype(float).to_numpy()
+    return _paired(_loss(y, d[new].to_numpy()) - _loss(y, d[ref].to_numpy()))
+
+
+def years_better_vs(d: pd.DataFrame, new: str, ref: str, min_year_fights: int = 50) -> tuple[int, int]:
+    """(years in which `new` had the lower log loss, years counted), over years with at least `min_year_fights` fights."""
+    y = d.went_distance.astype(float).to_numpy()
+    g = pd.DataFrame({"year": pd.to_datetime(d.event_date).dt.year.to_numpy(), "gain": _loss(y, d[ref].to_numpy()) - _loss(y, d[new].to_numpy())}).groupby("year").gain.agg(["size", "mean"])
+    g = g[g["size"] >= min_year_fights]
+    return int((g["mean"] > 0).sum()), int(len(g))

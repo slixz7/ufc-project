@@ -262,10 +262,11 @@ def match_fight(win: pd.DataFrame, url_a: str, url_b: str, name_a: str, name_b: 
     return None
 
 
-def run_grade(engine) -> int:
+def run_grade(engine, table: str = "upcoming_distance_v1") -> int:
+    """Grade the locked predictions in `table` (v1's, or v2's: same columns) against the results that have arrived."""
     ensure_tables(engine)
-    pend = pd.read_sql(sa.text("""SELECT p.bout_id, p.fighter_a, p.fighter_b, p.event_date, u.fighter_a_url, u.fighter_b_url
-                                  FROM upcoming_distance_v1 p JOIN upcoming_fights u ON u.bout_id = p.bout_id
+    pend = pd.read_sql(sa.text(f"""SELECT p.bout_id, p.fighter_a, p.fighter_b, p.event_date, u.fighter_a_url, u.fighter_b_url
+                                  FROM {table} p JOIN upcoming_fights u ON u.bout_id = p.bout_id
                                   WHERE p.graded_at IS NULL AND p.status = 'locked'"""), engine)
     if pend.empty:
         log.info("Nothing waiting to be graded.")
@@ -282,17 +283,17 @@ def run_grade(engine) -> int:
         with engine.begin() as conn:
             if fu is None:
                 if len(win):                    # the dataset has that night but this bout is not in it: it did not happen
-                    conn.execute(sa.text("UPDATE upcoming_distance_v1 SET status = 'no_result', graded_at = :t WHERE bout_id = :b"), {"t": now, "b": r.bout_id})
+                    conn.execute(sa.text(f"UPDATE {table} SET status = 'no_result', graded_at = :t WHERE bout_id = :b"), {"t": now, "b": r.bout_id})
                     missing += 1
                 else:
                     waiting += 1                # the dataset does not have that night yet
                 continue
             result = str(win[win.fight_url == fu].iloc[0].result)
             if result == "DQ":                  # neither a decision nor a real finish: leave it out, as in the backtest
-                conn.execute(sa.text("UPDATE upcoming_distance_v1 SET status = 'no_result', graded_at = :t WHERE bout_id = :b"), {"t": now, "b": r.bout_id})
+                conn.execute(sa.text(f"UPDATE {table} SET status = 'no_result', graded_at = :t WHERE bout_id = :b"), {"t": now, "b": r.bout_id})
                 missing += 1
                 continue
-            conn.execute(sa.text("UPDATE upcoming_distance_v1 SET went_distance = :w, graded_at = :t WHERE bout_id = :b"),
+            conn.execute(sa.text(f"UPDATE {table} SET went_distance = :w, graded_at = :t WHERE bout_id = :b"),
                          {"w": int(result.startswith("Decision")), "t": now, "b": r.bout_id})
             graded += 1
     log.info("Graded %d; %d had no result; %d are waiting for the dataset to include their event", graded, missing, waiting)

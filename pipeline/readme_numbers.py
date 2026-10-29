@@ -76,6 +76,7 @@ def load_frames(engine) -> dict:
         "live_v2": _read(engine, "upcoming_picks_v2", ["event_name", "event_date", "status", "confidence", "correct", "graded_at"]),
         "live_v3": _read(engine, "upcoming_picks_v3", ["event_name", "event_date", "status", "confidence", "correct", "graded_at"]),
         "dist": _read(engine, "fight_distance_v1", ["event_date", "p_distance", "p_base", "went_distance", "tier"]),
+        "dist2": _read(engine, "fight_distance_v2", ["event_date", "p_distance", "p_v1", "p_base", "went_distance", "tier"]),
         "market_share": None,
     }
     if sa.inspect(engine).has_table("fight_reasons") and frames["v3"] is not None:
@@ -206,6 +207,26 @@ def compute(frames: dict, n_tests: int | None = None) -> Numbers:
     else:
         out.skipped.append("the goes-the-distance backtest (fight_distance_v1) is missing or too small")
 
+    # the market-informed goes-the-distance prediction: added on a narrow margin, alongside the model-only one
+    dm = frames.get("dist2")
+    if dm is not None and len(dm) >= 200:
+        import distance_scores
+        rm = distance_scores.distance_scores(dm)
+        cmp_m = distance_scores.paired_vs(dm, "p_distance", "p_v1")
+        yb_m, yt_m = distance_scores.years_better_vs(dm, "p_distance", "p_v1")
+        v.update(dist2_n=num(rm["n"]), dist2_first_year=str(rm["first_year"]), dist2_last_year=str(rm["last_year"]), dist2_years_better=str(yb_m), dist2_years_total=str(yt_m))
+        gain = -cmp_m["mean"]                                    # positive: the market-informed prediction has the lower log loss
+        v.update(dist2_gain=f"{gain:.4f}", dist2_gain_lo=f"{-cmp_m['hi']:+.4f}", dist2_gain_hi=f"{-cmp_m['lo']:+.4f}")
+        # the README says: better on average, better in most years, but the 95% range includes zero (so the two cannot yet be told apart). Each part is checked.
+        if gain <= 0:
+            out.broken_claims.append("The README says the market-informed goes-the-distance prediction is better than the model-only one on average, but it no longer is.")
+        if cmp_m["verdict"] != "cannot be told apart":
+            out.broken_claims.append(f"The README says the market-informed and model-only goes-the-distance predictions cannot be told apart, but now the market-informed one is {cmp_m['verdict']}.")
+        if yt_m and yb_m / yt_m < 0.6:
+            out.broken_claims.append("The README says the market-informed goes-the-distance prediction was better in most years, but it no longer is.")
+    else:
+        out.skipped.append("the market-informed goes-the-distance backtest (fight_distance_v2) is missing or too small")
+
     # the yearly range of the model-only backtest, over years with enough fights
     d2 = frames.get("v2")
     if d2 is not None and len(d2):
@@ -282,7 +303,8 @@ def known_names() -> set:
     return {"n_fights", "first_year", "last_year", "acc_v2", "acc_line", "acc_v3", "dis_share", "dis_blend", "dis_model", "n_live_needed", "year_min_fights",
             "year_lo", "year_hi", "market_weight", "model_weight", "u333_n", "u333_v2", "u333_v3", "u333_expected_v2", "u333_expected_v3", "n_tests",
             "results_accuracy", "results_tiers", "calibration", "scoring_table", "scoring_compare", "distance_table", "dist_n", "dist_first_year", "dist_last_year",
-            "dist_gain", "dist_gain_lo", "dist_gain_hi", "dist_years_better", "dist_years_total", "dist_gap"}
+            "dist_gain", "dist_gain_lo", "dist_gain_hi", "dist_years_better", "dist_years_total", "dist_gap", "dist2_n", "dist2_first_year", "dist2_last_year",
+            "dist2_gain", "dist2_gain_lo", "dist2_gain_hi", "dist2_years_better", "dist2_years_total"}
 
 
 def refresh(engine, path: Path | None = None, write: bool = True, n_tests: int | None = None) -> dict:

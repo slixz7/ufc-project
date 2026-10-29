@@ -45,6 +45,7 @@ GAP_SCALE = 1.30            # how decisively hidden skill decides a fight
 STAT_EDGE = 3.0             # how much of the skill gap shows up in the per-fight statistics the models read
 MARKET_SEES = 0.85          # the share of the true gap the betting market sees...
 MARKET_NOISE = 0.55         # ...and how noisy its opening price is
+FINISH_PER_GAP = 0.13       # how much more often a lopsided matchup ends in a finish (in real fights, heavy favourites finish far more often)
 
 
 def _sigmoid(x):
@@ -136,9 +137,10 @@ def true_gap(a: Fighter, b: Fighter, d: date) -> float:
     return GAP_SCALE * (a.skill_at(d) - b.skill_at(d) + style + reach)
 
 
-def _how_it_ended(w: _World, win: Fighter, lose: Fighter, rounds: int):
+def _how_it_ended(w: _World, win: Fighter, lose: Fighter, rounds: int, gap: float = 0.0):
     r = w.rng
-    p_finish = float(np.clip(0.20 + 0.30 * win.power + 0.20 * (1 - lose.chin) - 0.10 * lose.cardio + (0.05 if rounds == 3 else -0.04), 0.12, 0.80))
+    p_finish = float(np.clip(0.20 + 0.30 * win.power + 0.20 * (1 - lose.chin) - 0.10 * lose.cardio + (0.05 if rounds == 3 else -0.04)
+                         + FINISH_PER_GAP * min(abs(gap), 2.0), 0.12, 0.80))
     if r.random() < 0.004:
         return "DQ", 1, f"0:{int(r.integers(10, 59)):02d}", 1.0
     if r.random() < p_finish:
@@ -156,7 +158,7 @@ def _simulate(w: _World, a: Fighter, b: Fighter, d: date, event: str, wc: str, f
     r = w.rng
     a_wins = r.random() < float(np.clip(_sigmoid(gap), 0.03, 0.97))                     # nobody is a certainty
     win, lose = (a, b) if a_wins else (b, a)
-    result, rnd, ftime, minutes = _how_it_ended(w, win, lose, rounds)
+    result, rnd, ftime, minutes = _how_it_ended(w, win, lose, rounds, gap)
     furl = f"{URL}/fight-details/{_hex('fight', d, a.fid, b.fid)}"
     fight = dict(fight_url=furl, event_date=d, event_name=event, weight_class=wc, title_fight=bool(flagged_title), num_rounds=float(rounds), result=result,
                  finish_round=float(rnd), finish_time=ftime)

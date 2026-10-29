@@ -1,9 +1,10 @@
 # Public pick log
 
-Two append-only files record everything this project has locked before an event:
+Three append-only files record everything this project has locked before an event:
 
 - **`locked_picks.csv`**: every winner pick (model-only and market-informed).
 - **`locked_distance.csv`**: every goes-the-distance prediction (the chance a fight ends in a decision).
+- **`locked_distance_market.csv`**: every market-informed goes-the-distance prediction, locked once a betting line exists. It has the same columns as `locked_distance.csv`; only the chance is written, never any odds.
 
 The daily GitHub job adds new rows to them and commits the files, so this repository's history shows **when each one was made**.
 

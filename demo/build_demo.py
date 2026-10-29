@@ -42,12 +42,14 @@ import db_roles  # noqa: E402
 import game_admin  # noqa: E402
 import game_db  # noqa: E402
 import model_distance  # noqa: E402
+import model_distance_v2  # noqa: E402
 import model_v2  # noqa: E402
 import model_v3  # noqa: E402
 import synth  # noqa: E402
 import upcoming  # noqa: E402
 
 INVITE_CODE = "demo"
+BUILD_VERSION = "2"             # bump when a change means a demo built by older code should be rebuilt (the launcher compares it); 2 = the market-informed distance model
 # Database logins belong to the whole Postgres SERVER, not to one database. The demo therefore uses logins of its own, named after its database, so that
 # building a demo on a server that also holds a real project can never change the real `site_reader` or `game_app`, and two demos cannot break each other.
 READER_PREFIX, GAME_PREFIX = "demo_site_", "demo_game_"
@@ -112,9 +114,9 @@ def _backdate(engine, bout_ids: list[str], locked: datetime, graded: datetime | 
     ids = list(bout_ids)
     with engine.begin() as conn:
         for table, col, when in (("upcoming_fights", "loaded_at", locked - timedelta(days=1)), ("upcoming_picks_v2", "predicted_at", locked), ("upcoming_predictions", "predicted_at", locked),
-                                 ("upcoming_distance_v1", "predicted_at", locked), ("upcoming_picks_v3", "predicted_at", lines), ("upcoming_odds", "entered_at", lines - timedelta(hours=3)),
+                                 ("upcoming_distance_v1", "predicted_at", locked), ("upcoming_picks_v3", "predicted_at", lines), ("upcoming_distance_v2", "predicted_at", lines), ("upcoming_odds", "entered_at", lines - timedelta(hours=3)),
                                  ("upcoming_picks_v2", "graded_at", graded), ("upcoming_picks_v3", "graded_at", graded), ("upcoming_predictions", "graded_at", graded),
-                                 ("upcoming_distance_v1", "graded_at", graded)):
+                                 ("upcoming_distance_v1", "graded_at", graded), ("upcoming_distance_v2", "graded_at", graded)):
             if when is None:
                 continue
             try:
@@ -206,6 +208,7 @@ def build(url: str, today: date | None = None, size: str = "normal", seed: int =
         _run("winner model v2: tables and views", model_v2.main, ["setup"], log)
         _run("market model v3: tables and views", model_v3.main, ["setup"], log)
         _run("distance model: tables", model_distance.main, ["setup"], log)
+        _run("market-informed distance model: tables", model_distance_v2.main, ["setup"], log)
         tmp = Path(tempfile.mkdtemp(prefix="demo_"))
         data.odds.to_csv(tmp / "odds.csv", index=False)
         _run("winner model v2: a walk-forward pick for every past fight", model_v2.main, ["backtest"], log)
@@ -216,6 +219,8 @@ def build(url: str, today: date | None = None, size: str = "normal", seed: int =
         else:
             log("  market model v3: skipped (too little history for it to learn from; a safeguard in the real model)")
         _run("distance model: walk-forward backtest", model_distance.main, ["backtest"], log)
+        if market:
+            _run("market-informed distance model: walk-forward backtest", model_distance_v2.main, ["backtest"], log)
         nowhere = str(tmp / "no_aliases.csv")                                    # never read the real project's name aliases
         for key in ("L1", "L2"):
             card = cards[key]
@@ -230,6 +235,7 @@ def build(url: str, today: date | None = None, size: str = "normal", seed: int =
             if market:
                 _run("enter the market lines", model_v3.main, ["odds", "--csv", str(tmp / f"{key}_odds.csv"), "--today", str(lines_day)], log)
                 _run("lock the market-informed picks (v3)", model_v3.main, ["predict", "--today", str(lines_day)], log)
+                _run("lock the market-informed distance predictions", model_distance_v2.main, ["predict", "--today", str(lines_day)], log)
             ids = list(_bouts(engine, name).bout_id)
             _backdate(engine, ids, datetime.combine(pick_day, datetime.min.time(), tzinfo=timezone.utc) + timedelta(hours=15), None,
                       datetime.combine(lines_day, datetime.min.time(), tzinfo=timezone.utc) + timedelta(hours=15))
@@ -237,14 +243,16 @@ def build(url: str, today: date | None = None, size: str = "normal", seed: int =
             with engine.begin() as conn:                                         # the event happens, and the data source publishes its results
                 fights.to_sql("fights", conn, if_exists="append", index=False, method="multi", chunksize=500)
                 ffs.to_sql("fighter_fights", conn, if_exists="append", index=False, method="multi", chunksize=500)
-            for label, fn in (("grade the card", upcoming.main), ("grade v2", model_v2.main), ("grade v3", model_v3.main), ("grade the distance picks", model_distance.main)):
-                if fn is model_v3.main and not market:
+            for label, fn in (("grade the card", upcoming.main), ("grade v2", model_v2.main), ("grade v3", model_v3.main), ("grade the distance picks", model_distance.main),
+                              ("grade the market-informed distance picks", model_distance_v2.main)):
+                if fn in (model_v3.main, model_distance_v2.main) and not market:
                     continue
                 _run(label, fn, ["grade"], log)
             _backdate(engine, ids, datetime.combine(pick_day, datetime.min.time(), tzinfo=timezone.utc), datetime.combine(card.date + timedelta(days=2), datetime.min.time(), tzinfo=timezone.utc)
                       + timedelta(hours=14), datetime.combine(lines_day, datetime.min.time(), tzinfo=timezone.utc) + timedelta(hours=15))
-            for label, fn in (("score the new fights (v2)", model_v2.main), ("score the new fights (v3)", model_v3.main), ("score the new fights (distance)", model_distance.main)):
-                if fn is model_v3.main and not market:
+            for label, fn in (("score the new fights (v2)", model_v2.main), ("score the new fights (v3)", model_v3.main), ("score the new fights (distance)", model_distance.main),
+                              ("score the new fights (market-informed distance)", model_distance_v2.main)):
+                if fn in (model_v3.main, model_distance_v2.main) and not market:
                     continue
                 _run(label, fn, ["backtest"], log)
         for key in ("U1", "U2", "U3"):
@@ -260,6 +268,7 @@ def build(url: str, today: date | None = None, size: str = "normal", seed: int =
             pretend = card.date - timedelta(days=2)
             _run("enter the market lines for the next card", model_v3.main, ["odds", "--csv", str(tmp / "U1_odds.csv"), "--today", str(pretend)], log)
             _run("lock its market-informed picks (v3)", model_v3.main, ["predict", "--today", str(pretend)], log)
+            _run("lock its market-informed distance predictions", model_distance_v2.main, ["predict", "--today", str(pretend)], log)
         log("Writing the plain-language reasons behind the picks ...")
         for label, fn in (("reasons for the locked picks (v2)", model_v2.main), ("reasons for the locked picks (v3)", model_v3.main)):
             if fn is model_v3.main and not market:
@@ -285,7 +294,7 @@ def build(url: str, today: date | None = None, size: str = "normal", seed: int =
         _seed_players(engine, cards, today, seed, log)
         _run("record how the played bouts ended (again, for the game)", bout_results.main, ["record", "--today", str(today)], log)
         with engine.begin() as conn:
-            for k, v in (("built_on", str(today)), ("size", size), ("seed", str(seed)), ("next_card", str(cards["U1"].date)), ("market_model", str(market))):
+            for k, v in (("built_on", str(today)), ("size", size), ("seed", str(seed)), ("next_card", str(cards["U1"].date)), ("market_model", str(market)), ("build_version", BUILD_VERSION)):
                 conn.execute(sa.text("INSERT INTO demo_meta (key, value) VALUES (:k, :v) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"), {"k": k, "v": v})
         return {"database_url": site_url, "game_database_url": game_url, "invite_code": INVITE_CODE, "player_pin": PLAYER_PIN, "players": [n for n, _ in PLAYERS],
                 "built_on": str(today), "next_card": str(cards["U1"].date), "market_model": market, "logins": [reader, game]}

@@ -27,7 +27,7 @@ import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "pipeline"))      # the shared scoring maths (numpy and pandas only)
 import distance_scores  # noqa: E402
-from distance_ui import line_html as dist_line_html, section_html as dist_section_html  # noqa: E402
+from distance_ui import line_html as dist_line_html, section_html as dist_section_html, section_v2_html as dist_section_v2_html  # noqa: E402
 import game_ui  # noqa: E402
 import title_rules  # noqa: E402
 
@@ -468,7 +468,7 @@ def scoring_html(r: dict) -> str:
             f'is less sharp than the closing line.{need} Not betting advice.</div>')
 
 
-DISTANCE: dict = {}         # bout_id -> (chance it goes the distance, scheduled rounds, tier), filled by the Upcoming page
+DISTANCE: dict = {}         # bout_id -> (chance it goes the distance, scheduled rounds, tier, market-informed chance or None), filled by the Upcoming page
 
 
 def has_table(name: str) -> bool:
@@ -481,7 +481,7 @@ def has_table(name: str) -> bool:
 def dist_html(r) -> str:
     try:
         x = DISTANCE.get(getattr(r, "bout_id", None))
-        return dist_line_html(x[0], x[1], x[2]) if x else ""
+        return dist_line_html(x[0], x[1], x[2], x[3] if len(x) > 3 else None) if x else ""
     except Exception:
         return ""                         # a prediction line must never break the page
 
@@ -709,7 +709,14 @@ def page_upcoming():
         dd = q("SELECT bout_id, p_distance, scheduled_rounds, tier FROM upcoming_distance_v1 WHERE status = 'locked' AND bout_id = ANY(:ids)",
                {"ids": [str(x) for x in bouts.bout_id]})
         for x in dd.itertuples():
-            DISTANCE[x.bout_id] = (float(x.p_distance), int(x.scheduled_rounds), str(x.tier))
+            DISTANCE[x.bout_id] = (float(x.p_distance), int(x.scheduled_rounds), str(x.tier), None)
+        try:                               # the market-informed prediction, where one is locked: shown beside the model-only one, and never able to break the page
+            if has_table("upcoming_distance_v2"):
+                for x in q("SELECT bout_id, p_distance FROM upcoming_distance_v2 WHERE status = 'locked' AND bout_id = ANY(:ids)", {"ids": [str(b) for b in bouts.bout_id]}).itertuples():
+                    if x.bout_id in DISTANCE:
+                        DISTANCE[x.bout_id] = DISTANCE[x.bout_id][:3] + (float(x.p_distance),)
+        except Exception:
+            pass
 
     urls = list(set(live.fighter_a_url) | set(live.fighter_b_url))
     rec = {}
@@ -1052,6 +1059,17 @@ def page_track():
                 lv = q("SELECT event_date, p_distance, p_base, went_distance FROM upcoming_distance_v1 WHERE status = 'locked' AND graded_at IS NOT NULL")
                 live_d = distance_scores.distance_scores(lv) if len(lv) >= 5 else None
             module_html(dist_section_html(distance_scores.distance_scores(dd), live_d))
+            try:                           # the market-informed section: a new part of the page must never be able to break it
+                if has_table("fight_distance_v2"):
+                    d2 = q("SELECT event_date, p_distance, p_v1, p_base, went_distance, tier FROM fight_distance_v2")
+                    if len(d2) >= 200:
+                        live2 = q("""SELECT m.p_distance AS p_v2, v.p_distance AS p_v1, m.went_distance FROM upcoming_distance_v2 m JOIN upcoming_distance_v1 v ON v.bout_id = m.bout_id
+                                     WHERE m.status = 'locked' AND m.graded_at IS NOT NULL AND m.went_distance IS NOT NULL""") if has_table("upcoming_distance_v2") else None
+                        module_html(dist_section_v2_html(distance_scores.distance_scores(d2), distance_scores.distance_scores(d2.assign(p_distance=d2.p_v1))["scores"]["model"],
+                                                         distance_scores.paired_vs(d2, "p_distance", "p_v1"), distance_scores.years_better_vs(d2, "p_distance", "p_v1"),
+                                                         distance_scores.pair_summary(live2, "p_v2", "p_v1") if live2 is not None and len(live2) >= 5 else None))
+            except Exception:
+                pass
 
 
 # ------------------------------------------------------------------------------------------------

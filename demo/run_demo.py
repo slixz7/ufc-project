@@ -49,9 +49,12 @@ def default_data_dir() -> Path:
     return base / "ufc-predictor-demo"
 
 
-def is_stale(meta: dict | None, today: date) -> bool:
-    """A demo is out of date when it was built more than STALE_AFTER_DAYS ago, or its 'next card' is no longer ahead of us."""
+def is_stale(meta: dict | None, today: date, build_version: str | None = None) -> bool:
+    """A demo is out of date when it was built more than STALE_AFTER_DAYS ago, its 'next card' is no longer ahead of us, or (when `build_version` is given)
+    it was made by an older version of the builder, for example before a model it should now contain existed."""
     if not meta or "built_on" not in meta:
+        return True
+    if build_version is not None and meta.get("build_version") != build_version:
         return True
     built = date.fromisoformat(meta["built_on"])
     nxt = date.fromisoformat(meta["next_card"]) if meta.get("next_card") else built
@@ -130,7 +133,7 @@ def main(argv=None) -> int:
     try:
         today = datetime.now(timezone.utc).date()
         meta = read_meta(engine)
-        if args.rebuild or is_stale(meta, today):
+        if args.rebuild or is_stale(meta, today, build_demo.BUILD_VERSION):
             print("Building the demo (about a minute): inventing fighters, then running the project's real pipeline on them.\n")
             try:
                 build_demo.build(owner_url, today=today, size=args.size, seed=args.seed, log=print)
