@@ -13,16 +13,20 @@ from __future__ import annotations
 
 import os
 import time
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import pandas as pd
 import requests
 import sqlalchemy as sa
 
+import game_core as core
+import game_scores
+
 SITE = "https://ufc-predictor.streamlit.app/"
 WEBHOOK_PREFIXES = ("https://discord.com/api/webhooks/", "https://discordapp.com/api/webhooks/")
 LIMIT = 1900                      # Discord allows 2000 characters per message
 WINDOW_DAYS = 14                  # announce picks for cards this close; announce results for events this recent
+REMINDER_WINDOW = timedelta(hours=30)      # remind about the friends' game within this long before a card's picks close (so at least one daily run falls inside it)
 TABLES = {"model-only": "upcoming_picks_v2", "market-informed": "upcoming_picks_v3"}
 DDL = "CREATE TABLE IF NOT EXISTS digest_sent (key TEXT PRIMARY KEY, sent_at TIMESTAMPTZ DEFAULT now())"
 FOOTER = f"Not betting advice. The reasons behind every pick: {SITE}"
@@ -92,6 +96,32 @@ def results_messages(event_date, event_name: str, v2: pd.DataFrame, v3: pd.DataF
     return chunk(lines)
 
 
+def md(text) -> str:
+    """Escape what Discord would turn into formatting (a nickname can contain an underscore)."""
+    return "".join("\\" + c if c in "\\*_~`>|" else c for c in str(text))
+
+
+def close_reminder_message(event_name: str, closes: datetime, now: datetime, picked: int, players: int) -> str:
+    hours = max(1, round((closes - now).total_seconds() / 3600))
+    return (f"⏰ **{md(event_name)}**: the friends' game closes picks in about {hours} hour{'s' if hours != 1 else ''}, at {core.when_text(closes)}.\n"
+            f"{picked} of {players} player{'s' if players != 1 else ''} {'has' if picked == 1 else 'have'} made picks so far. Make or change yours: {SITE} (the Game tab)")
+
+
+def game_results_messages(event_date, event_name: str, card: pd.DataFrame, season: pd.DataFrame, year: int) -> list[str]:
+    """card / season: core.versus_model_board frames (nickname, picks, winners_right, points, vs_model) for this card and for the year so far."""
+    medals = {1: "🥇", 2: "🥈", 3: "🥉"}
+    lines = [f"🏆 **Game results: {md(event_name)}** ({day(event_date)})", "Beat the model (your result minus the model's; copying it scores 0):"]
+    for i, r in enumerate(card.head(8).itertuples(), start=1):
+        lines.append(f"{medals.get(i, f'{i}.')} {md(r.nickname)}: {int(r.vs_model):+d} vs the model, {int(r.points)} points ({int(r.winners_right)} of {int(r.picks)} winners)")
+    if len(card) > 8:
+        lines.append(f"…and {len(card) - 8} more")
+    if not season.empty:
+        lead = season.iloc[0]
+        lines.append(f"{year} so far: {md(lead.nickname)} leads against the model at {int(lead.vs_model):+d}.")
+    lines.append(f"Play along: {SITE}")
+    return chunk(lines)
+
+
 # ----------------------------------------------------------------------------------------------
 # database: what is waiting to be announced
 # ----------------------------------------------------------------------------------------------
@@ -116,8 +146,50 @@ def mark_sent(engine, keys: list[str]) -> None:
             conn.execute(sa.text("INSERT INTO digest_sent (key) VALUES (:k) ON CONFLICT (key) DO NOTHING"), {"k": k})
 
 
-def pending(engine, today: date, window: int = WINDOW_DAYS) -> list[dict]:
+def game_groups(engine, today: date, now: datetime, sent: set, window: int = WINDOW_DAYS) -> list[dict]:
+    """The friends' game: a reminder shortly before a card's picks close, and the leaderboard once a card's results are all in. Only counts and
+    scores are ever posted, never who picked whom. Nothing at all until at least one player has joined."""
+    q = lambda sql, params=None: pd.read_sql(sa.text(sql), engine, params=params or {})
+    n_players = game_scores.safe(q, "SELECT COUNT(*) AS n FROM game_players", columns=["n"])
+    players = 0 if n_players.empty else int(n_players.n.iloc[0])
+    if players == 0:
+        return []
+    groups: list[dict] = []
+    ahead = game_scores.safe(q, "SELECT bout_id, event_date, event_name FROM upcoming_fights WHERE status = 'scheduled' AND event_date >= :t AND event_date <= :u",
+                             {"t": today, "u": today + timedelta(days=3)}, columns=["bout_id", "event_date", "event_name"])
+    starts = game_scores.starts(q)
+    picks = None
+    for (d, name), g in ahead.groupby(["event_date", "event_name"]):
+        d = pd.Timestamp(d).date()
+        key = f"game_close:{d}"
+        closes = core.closes_at(d, starts.get(d))
+        if key in sent or not timedelta(0) < closes - now <= REMINDER_WINDOW:
+            continue
+        picks = game_scores.safe(q, "SELECT player_id, bout_id FROM game_picks", columns=["player_id", "bout_id"]) if picks is None else picks
+        picked = int(picks[picks.bout_id.isin(g.bout_id)].player_id.nunique())
+        groups.append({"kind": "game_close", "date": d, "order": 3, "label": f"game reminder for {name}", "keys": [key],
+                       "messages": [close_reminder_message(name, closes, now, picked, players)]})
+    done = game_scores.safe(q, "SELECT u.event_date, u.event_name, r.bout_id AS done FROM upcoming_fights u LEFT JOIN bout_results r ON r.bout_id = u.bout_id "
+                               "WHERE u.status = 'scheduled' AND u.event_date < :t AND u.event_date >= :s", {"t": today, "s": today - timedelta(days=window)},
+                            columns=["event_date", "event_name", "done"])
+    scored = None
+    for (d, name), g in done.groupby(["event_date", "event_name"]):
+        d = pd.Timestamp(d).date()
+        key = f"game_results:{d}:{name}"
+        if key in sent or g.done.isna().any():
+            continue                                               # already announced, or the dataset does not have every result yet
+        scored = game_scores.score_all(q, engine) if scored is None else scored
+        card = scored[(scored.event_name == name) & (pd.to_datetime(scored.event_date).dt.date == d)] if not scored.empty else scored
+        if card.empty:
+            continue                                               # nobody had picks on this card
+        groups.append({"kind": "game_results", "date": d, "order": 4, "label": f"game results of {name}", "keys": [key],
+                       "messages": game_results_messages(d, name, core.versus_model_board(card), core.versus_model_board(scored, d.year), d.year)})
+    return groups
+
+
+def pending(engine, today: date, window: int = WINDOW_DAYS, now: datetime | None = None) -> list[dict]:
     """Announcements not yet sent: [{kind, label, keys, messages}], oldest event first."""
+    now = now or datetime.now(timezone.utc)
     sent = sent_keys(engine)
     groups: list[dict] = []
     frames = {}
@@ -147,6 +219,7 @@ def pending(engine, today: date, window: int = WINDOW_DAYS) -> list[dict]:
             g3 = None if v3 is None else v3[v3.bout_id.isin(g.bout_id)]
             groups.append({"kind": "results", "date": pd.Timestamp(d).date(), "order": 2, "label": f"results of {name}", "keys": [key],
                            "messages": results_messages(d, name, g, g3)})
+    groups += game_groups(engine, today, now, sent, window)
     return sorted(groups, key=lambda x: (x["date"], x["order"]))
 
 
@@ -176,7 +249,7 @@ def post(url: str, text: str, session=None, sleep=time.sleep):
     return 429
 
 
-def run_digest(engine, today: date, rep, dry_run: bool, session=None, pause: float = 0.6, sleep=time.sleep) -> None:
+def run_digest(engine, today: date, rep, dry_run: bool, session=None, pause: float = 0.6, sleep=time.sleep, now: datetime | None = None) -> None:
     url = os.getenv("DISCORD_WEBHOOK_URL", "").strip()
     if not url:
         rep.add("Discord digest", "No DISCORD_WEBHOOK_URL set, skipped.")
@@ -185,7 +258,7 @@ def run_digest(engine, today: date, rep, dry_run: bool, session=None, pause: flo
         rep.add("Discord digest", "DISCORD_WEBHOOK_URL does not look like a Discord webhook address, skipped.")
         rep.need("Discord: the DISCORD_WEBHOOK_URL secret is not a Discord webhook address (it should start with https://discord.com/api/webhooks/).")
         return
-    groups = pending(engine, today)
+    groups = pending(engine, today, now=now)
     n_msgs = sum(len(g["messages"]) for g in groups)
     if dry_run:
         rep.add("Discord digest", f"{len(groups)} announcement(s) would be posted ({n_msgs} message(s)); nothing was sent.")

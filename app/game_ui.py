@@ -20,18 +20,13 @@ import streamlit as st
 
 import game_core as core
 import game_db
+from game_scores import DIST_SQL, model_winners as _model_winners, score_all as _scored, starts as _starts
 
 OPEN_COLS = ["bout_id", "event_name", "event_date", "bout_order", "weight_class", "title_fight", "fighter_a", "fighter_b", "status"]
 OPEN_SQL = """SELECT bout_id, event_name, event_date, bout_order, weight_class, title_fight, fighter_a_name AS fighter_a, fighter_b_name AS fighter_b, status
               FROM upcoming_fights WHERE status = 'scheduled' AND event_date >= :t ORDER BY event_date, bout_order"""
 CLOSED_SQL = """SELECT bout_id, event_name, event_date, bout_order, fighter_a_name AS fighter_a, fighter_b_name AS fighter_b
                 FROM upcoming_fights WHERE status = 'scheduled' AND event_date <= :t ORDER BY event_date DESC, bout_order"""
-RESULTS_SQL = """SELECT u.bout_id, u.event_name, u.event_date, u.fighter_a_name AS fighter_a, u.fighter_b_name AS fighter_b, r.winner_side,
-                        r.method AS actual_method, r.finish_round, r.went_distance
-                 FROM upcoming_fights u JOIN bout_results r ON r.bout_id = u.bout_id"""
-STARTS_SQL = "SELECT event_date, first_start FROM event_starts"
-MODEL_SQL = "SELECT bout_id, predicted_winner AS model_winner, confidence FROM {table} WHERE status = 'locked'"
-DIST_SQL = "SELECT bout_id, p_distance, scheduled_rounds FROM upcoming_distance_v1 WHERE status = 'locked'"
 SUFFIXES = {"jr", "jr.", "sr", "sr.", "ii", "iii", "iv"}
 FINE_PRINT = """
 **What you pick.** For each fight on the next card: the winner, how it ends (KO/TKO, Submission or Decision) and, for a finish, the round. Change your picks, or clear one, as often as you like until the card closes: **6 hours before its first fight starts**, the same for every card (the time comes from the betting feed; until it is known, picks close at 18:00 UTC the day before the event). Nobody can see anyone else's picks until then.
@@ -117,18 +112,7 @@ def _clock() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _when(dt: datetime) -> str:
-    return f"{dt:%a %b} {dt.day}, {dt.hour % 12 or 12}:{dt:%M} {'AM' if dt.hour < 12 else 'PM'}"
-
-
-def _cutoff_text(c: datetime) -> str:
-    """'Fri Oct 30, 5:00 PM Pacific (Sat Oct 31, 12:00 AM UTC)': when picks close, in a time most friends will recognise and in UTC."""
-    utc = f"{_when(c)} UTC"
-    try:
-        from zoneinfo import ZoneInfo
-        return f"{_when(c.astimezone(ZoneInfo('America/Los_Angeles')))} Pacific ({utc})"
-    except Exception:                                                           # no time zone database on this machine: UTC is still right
-        return utc
+_cutoff_text = core.when_text                                      # the same wording the Discord reminders use
 
 
 def _countdown(closes: datetime, now: datetime) -> str:
@@ -151,19 +135,6 @@ def _side(name: str, side: str, pick_note: str | None) -> str:
     first, last = _split(name)
     pk = f'<div class="pk">MODEL PICK &middot; {esc(pick_note)}</div>' if pick_note else ""
     return f'<div class="side {side}{" pick" if pick_note else ""}">{pk}<div class="first">{esc(first)}</div><div class="last">{esc(last)}</div></div>'
-
-
-def _starts(q) -> dict:
-    """{event date: when its first fight is expected to start}, for the cards the odds feed has given start times for."""
-    df = _safe(q, STARTS_SQL, columns=["event_date", "first_start"])
-    return {pd.Timestamp(r.event_date).date(): pd.Timestamp(r.first_start) for r in df.itertuples() if pd.notna(r.first_start)}
-
-
-def _model_winners(q) -> pd.DataFrame:
-    v2 = _safe(q, MODEL_SQL.format(table="upcoming_picks_v2"), columns=["bout_id", "model_winner", "confidence"])
-    v3 = _safe(q, MODEL_SQL.format(table="upcoming_picks_v3"), columns=["bout_id", "model_winner", "confidence"])
-    both = pd.concat([v3.assign(rank=0), v2.assign(rank=1)], ignore_index=True)                    # the pick the site shows: market-informed when there is one
-    return both.sort_values("rank").drop_duplicates("bout_id")[["bout_id", "model_winner", "confidence"]].reset_index(drop=True)
 
 
 def _close_reason(event_date, first_start) -> str:
@@ -357,16 +328,6 @@ def _picks_tab(q, engine, player: dict, clock) -> None:
 # ----------------------------------------------------------------------------------------------
 # the leaderboards and everyone's picks
 # ----------------------------------------------------------------------------------------------
-def _scored(q, engine) -> pd.DataFrame:
-    res = _safe(q, RESULTS_SQL, columns=["bout_id", "event_name", "event_date", "fighter_a", "fighter_b", "winner_side", "actual_method", "finish_round", "went_distance"])
-    picks = game_db.all_picks(engine)
-    if res.empty or picks.empty:
-        return pd.DataFrame(columns=core.SCORED_COLUMNS)
-    dist = _safe(q, DIST_SQL, columns=["bout_id", "p_distance", "scheduled_rounds"])
-    return core.score_picks(picks, res[["bout_id", "event_name", "event_date", "fighter_a", "fighter_b"]],
-                            res[["bout_id", "winner_side", "actual_method", "finish_round", "went_distance"]], _model_winners(q)[["bout_id", "model_winner"]], dist)
-
-
 def _board_html(board: pd.DataFrame, me: str) -> str:
     if board.empty:
         return '<div class="note">Nothing to show yet.</div>'

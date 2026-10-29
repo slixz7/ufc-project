@@ -109,6 +109,20 @@ def cutoff(event_date) -> datetime:
     return datetime(d.year, d.month, d.day, tzinfo=timezone.utc)
 
 
+def _when(dt: datetime) -> str:
+    return f"{dt:%a %b} {dt.day}, {dt.hour % 12 or 12}:{dt:%M} {'AM' if dt.hour < 12 else 'PM'}"
+
+
+def when_text(c: datetime) -> str:
+    """'Fri Oct 30, 5:00 PM Pacific (Sat Oct 31, 12:00 AM UTC)': a moment as most friends will recognise it, and in UTC."""
+    utc = f"{_when(c)} UTC"
+    try:
+        from zoneinfo import ZoneInfo
+        return f"{_when(c.astimezone(ZoneInfo('America/Los_Angeles')))} Pacific ({utc})"
+    except Exception:                                                           # no time zone database on this machine: UTC is still right
+        return utc
+
+
 def closes_at(event_date, first_start=None) -> datetime:
     """When picks close: PICK_BUFFER before the card's first fight starts (`first_start`). If that is not known yet, PICK_BUFFER before 00:00 UTC on
     the event date (18:00 UTC the day before): earlier than any card in the world starts, so it is safe, and usually earlier than the real rule."""
