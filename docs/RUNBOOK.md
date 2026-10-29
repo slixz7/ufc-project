@@ -164,6 +164,16 @@ Running it:
 - The weekly backup includes the game tables (nicknames, hashed PINs and picks) in the private backup repository.
 - The tests that check the permissions need a Postgres server: the Tests workflow starts one. To run them yourself, set `TEST_PG_ADMIN_URL` to a server where that user may create databases and roles; without it they skip.
 
+## The demo
+
+`python demo/run_demo.py` runs the whole project on invented fighters with no accounts (see `demo/README.md`). Three files do the work: `demo/synth.py` invents the base tables (`fights`, `fighter_fights`), a historical-lines table and five cards; `demo/build_demo.py` fills an empty Postgres and then runs the REAL pipeline commands in order, replaying two played cards with each stage's `--today` option; `demo/run_demo.py` starts a private Postgres (the `pixeltable-pgserver` package), builds or reuses the demo, and starts the website with `DEMO_MODE=1`.
+
+- **The demo is also a build-from-nothing test.** `tests/test_demo.py` builds whole demos on a real Postgres and opens every page of the website on them. If you change a table layout, add a pipeline stage or a page query, that test fails until `demo/build_demo.py` (or `synth.py`) is updated. That is intended: it proves the project can still be built from scratch.
+- **It can only ever build into an empty database** (or one it built before) and refuses hosted providers. Its database logins are `demo_site_<database>` and `demo_game_<database>`, so it never touches `site_reader` or `game_app`.
+- **`DEMO_MODE` must never be set on the real site.** It switches on the DEMO banner and a sign-in hint; the launcher sets it, and a test checks that the daily workflow does not.
+- **The demo's database lives in your system's cache folder, never in the project** (a database inside OneDrive gets damaged by the syncing). `--data-dir` or `UFC_DEMO_DIR` changes it; deleting the folder removes the demo.
+- **A model change that needs more history** (for example a larger minimum for the market model) may need a bigger `normal` size in `synth.py`; the builder skips the market model, and says so, when the history is too short for it.
+
 ## Backups
 
 `.github/workflows/backup.yml` runs every Sunday (and on demand), dumps every table except the rebuildable `fight_reasons` cache to plain CSV in a stable order, checks the files against `MANIFEST.csv`, and commits them to a **private** repository named `ufc-project-backups`. A week with no new data produces identical files and no commit.

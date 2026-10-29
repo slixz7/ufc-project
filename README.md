@@ -6,6 +6,8 @@ A web app that predicts UFC fights **before they happen**, locks each pick with 
 
 **Live app: https://ufc-predictor.streamlit.app/**
 
+**No accounts? [Run the demo in two minutes](demo/README.md):** the real pipeline, models and website, running on invented fighters (`python demo/run_demo.py`).
+
 [![Tests](https://github.com/slixz7/ufc-project/actions/workflows/tests.yml/badge.svg)](https://github.com/slixz7/ufc-project/actions/workflows/tests.yml)
 
 > Independent project, not affiliated with the UFC. Predictions are for fun and learning, not betting advice. The app never shows betting odds.
@@ -20,9 +22,10 @@ A web app that predicts UFC fights **before they happen**, locks each pick with 
 | **Best result** | **<!--n:acc_v3-->65.4%<!--/n-->** of <!--n:n_fights-->5,279<!--/n--> fights picked correctly (<!--n:first_year-->2016<!--/n--> to <!--n:last_year-->2026<!--/n-->), every pick made using only data from before that fight. A coin flip is 50% |
 | **Also predicts** | The chance each fight goes the distance, with its own honest backtest and predictions locked before the event |
 | **Friends' game** | A private "beat the model" game: friends pick the winner, method and round before a card and are scored against the model |
+| **Demo** | One command runs the whole project on invented fighters, with no accounts or credentials: the real pipeline builds a private database and the real website opens on it |
 | **Stack** | Python (pandas, scikit-learn), PostgreSQL on Neon, SQL window functions, Streamlit, GitHub Actions |
 | **Automation** | A daily job reads announced cards (Wikipedia), betting lines (The Odds API) and results (Kaggle) |
-| **Safety** | <!--n:n_tests-->169<!--/n--> offline tests run before every scheduled job, a dry-run mode, and a read-only database user behind the public app |
+| **Safety** | <!--n:n_tests-->187<!--/n--> offline tests run before every scheduled job, a dry-run mode, and a read-only database user behind the public app |
 | **Transparency** | Every locked pick and goes-the-distance prediction is also published to a [public, time-stamped log](picks_log/ABOUT.md) in this repository |
 | **Cost** | Free tiers only |
 
@@ -151,7 +154,8 @@ The most useful part of this project was catching results that looked good and w
 5. **A "read-only" login that could write.** I had checked early on that the public site's database login looked read-only. When I later built an audit for the friends' game, it showed that this login, made in the database host's web console, silently belonged to a built-in role that can read and write every table and create other logins, and could read the private odds table I thought I had hidden. Nothing had gone wrong, but the protection was not there. I replaced it with a login made in plain SQL, wrote an audit that checks the things that matter (extra roles, write access, private tables, creating objects), and run it on a real Postgres server in CI, with the old login's exact setup reproduced as a test.
 6. **"Title fights" that were not.** The Past events page showed three "Title" tags on one card (UFC 325). The source data flags tournament bouts (finals and semifinals of The Ultimate Fighter and Road to UFC) exactly like championships: that card had one title fight and three Road to UFC finals. The page also sorted by that flag, so the real main event was listed fourth. A championship is now defined as flagged *and* scheduled for five rounds (since 2001), the rest are labelled "Tournament", and a test checks the SQL the page runs against a plain Python version of the rule on every edge case. I also measured whether the models had been misled: on the real history, swapping in the corrected flag changed the goes-the-distance model's log loss by 0.00003 (the 95% range is about plus or minus 0.0003), so the model was left alone, and the winner models do not use the flag.
 7. **A pick deadline that could close after the fights began.** Picks first closed at 00:00 UTC on event day. Checking that rule against UFC 325 showed the flaw: the card was in Sydney, and its first fight started around 22:00 UTC the evening *before* its event date, so a player could still pick for about two hours after it began. For US cards the same rule closed picks 14 to 23 hours before the first fight, which was needlessly early. The rule is now one number for every card: **picks close 6 hours before the card's first fight**. The first-fight time is the earliest start time in the odds feed, saved each day in a small public table. I checked how the feed behaves on the real odds history: it gives per-fight times, but weeks out it lists only the top fights, so while a card is only partly listed the estimate is made more cautious (5 hours) and relaxes as the rest is listed. While a card is open its recorded start follows the best current estimate; once its picks have closed it is never changed, so a closed card cannot reopen. If a card's time is not known, picks close at 18:00 UTC the day before its event date, which is safe for any card in the world, and the daily report warns about a card within three days with no time. The server re-checks the same deadline on every pick, and the whole path is tested on a real Postgres with a pretend odds feed.
-8. **Claims I had to retract.** I first assumed the dataset had no betting odds. The columns exist but are empty, which is why I went looking for another source. A "reach unknown" flag looked predictive but leaks information (reach is recorded partly based on how long a fighter lasted), so it is out.
+8. **A demo that could have reset a real login.** Building the one-command demo, I found that database logins belong to the whole server, not to one database. A demo built beside a real project would have reset the real read-only login's password and taken the live site down. The demo now uses logins of its own, named after its database, and refuses to build into anything but an empty database or hosted providers, and a test proves that a real login on the same server keeps working. The same tests also caught the website's five-minute query cache serving one demo's data to another, which is why they clear it between runs.
+9. **Claims I had to retract.** I first assumed the dataset had no betting odds. The columns exist but are empty, which is why I went looking for another source. A "reach unknown" flag looked predictive but leaks information (reach is recorded partly based on how long a fighter lasted), so it is out.
 
 ## How the model evolved
 
@@ -205,7 +209,7 @@ An unattended job that writes to a database needs guardrails, so these are delib
 - **A card that suddenly shrinks is refused**, because that is more likely a parsing problem than real.
 - **Locked picks never change, and anyone can check.** A pick is made before its event and the lock is enforced in code. Each day's new picks and goes-the-distance predictions are also committed to a public log, so the repository history shows when each was made; `python pipeline/pick_log.py verify` reads that history and reports how many were committed before their event. The job also compares every logged row with the database each run and raises an alert if one differs. [What the log does and does not prove](picks_log/ABOUT.md).
 - **Dry-run first.** Every step can run in a mode that reports and writes nothing.
-- **Offline tests run before every scheduled job**, so a broken page reader stops the job before it writes anything. There are <!--n:n_tests-->169<!--/n-->, covering name matching, page parsing, the betting-line maths, that reasons add up to picks, the scoring maths, the pick log and the Discord digest.
+- **Offline tests run before every scheduled job**, so a broken page reader stops the job before it writes anything. There are <!--n:n_tests-->187<!--/n-->, covering name matching, page parsing, the betting-line maths, that reasons add up to picks, the scoring maths, the pick log and the Discord digest.
 - **Least privilege, verified rather than assumed.** The public app connects with a dedicated read-only database user made with plain SQL. An audit command checks that it holds no extra roles or powers, cannot write or create anything, and cannot read the private tables (the raw odds, the game's players and picks), and those checks run against a real Postgres server on every push. The owner connection string lives only in GitHub's encrypted secrets, and the public app holds only the read-only one.
 - **The friends' game writes through a locked-down database user** that can reach only its own tables, with the permissions tested on a real Postgres server on every push.
 - **Weekly backups.** The whole database, including the odds history that cannot be re-downloaded, is backed up every week to a private repository as plain CSV. A verifier checks every file against a manifest, and the restore tool never overwrites existing data.
@@ -241,7 +245,7 @@ The first version of the scoreboard was a Power BI dashboard on the same databas
 
 ## Run it yourself
 
-See the **[runbook](docs/RUNBOOK.md)** for the commands, the schedule setup, and the project layout.
+The quickest way is the **[demo](demo/README.md)**: `pip install -r demo/requirements.txt`, then `python demo/run_demo.py`. It needs no accounts and runs the whole project on invented data. To run it on real data, see the **[runbook](docs/RUNBOOK.md)** for the commands, the schedule setup, and the project layout.
 
 ## Data and credits
 

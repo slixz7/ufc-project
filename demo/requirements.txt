@@ -1,0 +1,8 @@
+streamlit>=1.60
+pandas>=2.0
+numpy>=1.26
+scikit-learn>=1.3
+sqlalchemy>=2.0
+psycopg2-binary>=2.9
+requests>=2.31
+pixeltable-pgserver>=0.6

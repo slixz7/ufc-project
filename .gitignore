@@ -9,3 +9,6 @@ __pycache__/
 .pytest_cache/
 *.zip
 raw/
+
+# a demo database made with --data-dir inside the project (by default it lives in the system cache folder instead)
+demo/.data/

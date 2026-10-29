@@ -71,6 +71,8 @@ label[data-testid="stRadioOption"][data-selected="true"] p {color:#171717; font-
 .ufc .mast .top {display:flex; justify-content:space-between; align-items:baseline; flex-wrap:wrap; gap:4px 20px; margin-bottom:6px;}
 .ufc .brand {font-size:2.6rem; font-weight:800; line-height:1; letter-spacing:.02em;}
 .ufc .dateline {color:var(--muted);}
+.ufc .demo-banner {border:2px solid var(--accent); color:var(--accent); background:rgba(196,54,31,.06); padding:9px 14px; margin:12px 0 2px; font-size:.86rem; line-height:1.45;}
+.ufc .demo-banner b {font-family:'Barlow Condensed','Arial Narrow',Arial,sans-serif; font-size:1.15rem; letter-spacing:.1em; margin-right:8px;}
 
 /* event headline */
 .ufc .hero {padding:26px 0 4px;}
@@ -1068,6 +1070,9 @@ def main():
     today = date.today()
     module_html(f'<div class="mast"><div class="top"><div class="brand disp">UFC Fight Predictor</div>'
                 f'<div class="dateline mono">{esc(today.strftime("%A, %B %d, %Y"))} &nbsp;·&nbsp; Results through {esc(f_date(newest))}</div></div></div>')
+    if os.getenv("DEMO_MODE"):                       # set by demo/run_demo.py: never on the real site
+        module_html('<div class="demo-banner"><b>DEMO</b>Every fighter, fight and result on this site is invented. The data pipeline, the models and these pages are the real ones, '
+                    'running on made-up data, so the numbers show how the system works and say nothing about real fights.</div>')
     page = st.radio("Navigate", ["Upcoming", "Past events", "Fighters", "Track record", "Game"],
                     horizontal=True, label_visibility="collapsed")
     try:

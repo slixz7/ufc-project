@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import html
+import os
 from datetime import datetime, timedelta, timezone
 
 import pandas as pd
@@ -172,6 +173,8 @@ def _sign_in_or_join(engine, invite_code: str, clock) -> None:
               <div class="c"><div class="v">2</div><div class="l">Lock</div><div class="small muted">Picks close before the first fight and are revealed then.</div></div>
               <div class="c"><div class="v">3</div><div class="l">Score</div><div class="small muted">Points for being right, and a bonus for beating the model.</div></div>
             </div>""")
+    if os.getenv("DEMO_MODE"):                       # set by demo/run_demo.py: never on the real site
+        st.info("Demo: sign in as demo_ann, demo_bob, demo_cyd, demo_dee, demo_eli or demo_fay with the PIN 123456, or join as yourself with the invite code demo.")
     tab_in, tab_join = st.tabs(["Sign in", "Join"])
     with tab_in:
         with st.form("g_form_signin"):
