@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import html
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 import sqlalchemy as sa
@@ -23,17 +23,18 @@ import game_db
 
 OPEN_COLS = ["bout_id", "event_name", "event_date", "bout_order", "weight_class", "title_fight", "fighter_a", "fighter_b", "status"]
 OPEN_SQL = """SELECT bout_id, event_name, event_date, bout_order, weight_class, title_fight, fighter_a_name AS fighter_a, fighter_b_name AS fighter_b, status
-              FROM upcoming_fights WHERE status = 'scheduled' AND event_date > :t ORDER BY event_date, bout_order"""
+              FROM upcoming_fights WHERE status = 'scheduled' AND event_date >= :t ORDER BY event_date, bout_order"""
 CLOSED_SQL = """SELECT bout_id, event_name, event_date, bout_order, fighter_a_name AS fighter_a, fighter_b_name AS fighter_b
                 FROM upcoming_fights WHERE status = 'scheduled' AND event_date <= :t ORDER BY event_date DESC, bout_order"""
 RESULTS_SQL = """SELECT u.bout_id, u.event_name, u.event_date, u.fighter_a_name AS fighter_a, u.fighter_b_name AS fighter_b, r.winner_side,
                         r.method AS actual_method, r.finish_round, r.went_distance
                  FROM upcoming_fights u JOIN bout_results r ON r.bout_id = u.bout_id"""
+STARTS_SQL = "SELECT event_date, first_start FROM event_starts"
 MODEL_SQL = "SELECT bout_id, predicted_winner AS model_winner, confidence FROM {table} WHERE status = 'locked'"
 DIST_SQL = "SELECT bout_id, p_distance, scheduled_rounds FROM upcoming_distance_v1 WHERE status = 'locked'"
 SUFFIXES = {"jr", "jr.", "sr", "sr.", "ii", "iii", "iv"}
 FINE_PRINT = """
-**What you pick.** For each fight on the next card: the winner, how it ends (KO/TKO, Submission or Decision) and, for a finish, the round. Change your picks, or clear one, as often as you like until the card closes at **00:00 UTC on the day of the event**. Nobody can see anyone else's picks until then.
+**What you pick.** For each fight on the next card: the winner, how it ends (KO/TKO, Submission or Decision) and, for a finish, the round. Change your picks, or clear one, as often as you like until the card closes: **6 hours before its first fight starts**, the same for every card (the time comes from the betting feed; until it is known, picks close at 18:00 UTC the day before the event). Nobody can see anyone else's picks until then.
 
 **Points.** Winner right: **+1**. Method right (and the winner too): **+1**. Round right (winner and method too, for a finish): **+1**. That is up to 3 a fight.
 
@@ -120,9 +121,8 @@ def _when(dt: datetime) -> str:
     return f"{dt:%a %b} {dt.day}, {dt.hour % 12 or 12}:{dt:%M} {'AM' if dt.hour < 12 else 'PM'}"
 
 
-def _cutoff_text(event_date) -> str:
+def _cutoff_text(c: datetime) -> str:
     """'Fri Oct 30, 5:00 PM Pacific (Sat Oct 31, 12:00 AM UTC)': when picks close, in a time most friends will recognise and in UTC."""
-    c = core.cutoff(event_date)
     utc = f"{_when(c)} UTC"
     try:
         from zoneinfo import ZoneInfo
@@ -131,8 +131,8 @@ def _cutoff_text(event_date) -> str:
         return utc
 
 
-def _countdown(event_date, now: datetime) -> str:
-    secs = int((core.cutoff(event_date) - now).total_seconds())
+def _countdown(closes: datetime, now: datetime) -> str:
+    secs = int((closes - now).total_seconds())
     d, rem = divmod(max(secs, 0), 86400)
     h, m = rem // 3600, (rem % 3600) // 60
     return f"{d} day{'s' if d != 1 else ''} {h} h" if d else (f"{h} h {m} min" if h else f"{m} min")
@@ -153,11 +153,25 @@ def _side(name: str, side: str, pick_note: str | None) -> str:
     return f'<div class="side {side}{" pick" if pick_note else ""}">{pk}<div class="first">{esc(first)}</div><div class="last">{esc(last)}</div></div>'
 
 
+def _starts(q) -> dict:
+    """{event date: when its first fight is expected to start}, for the cards the odds feed has given start times for."""
+    df = _safe(q, STARTS_SQL, columns=["event_date", "first_start"])
+    return {pd.Timestamp(r.event_date).date(): pd.Timestamp(r.first_start) for r in df.itertuples() if pd.notna(r.first_start)}
+
+
 def _model_winners(q) -> pd.DataFrame:
     v2 = _safe(q, MODEL_SQL.format(table="upcoming_picks_v2"), columns=["bout_id", "model_winner", "confidence"])
     v3 = _safe(q, MODEL_SQL.format(table="upcoming_picks_v3"), columns=["bout_id", "model_winner", "confidence"])
     both = pd.concat([v3.assign(rank=0), v2.assign(rank=1)], ignore_index=True)                    # the pick the site shows: market-informed when there is one
     return both.sort_values("rank").drop_duplicates("bout_id")[["bout_id", "model_winner", "confidence"]].reset_index(drop=True)
+
+
+def _close_reason(event_date, first_start) -> str:
+    """One sentence on when picks close and why, so a friend is never surprised."""
+    if first_start is None:
+        return ("We do not have this card's schedule yet, so for now picks close at 18:00 UTC the day before the event. "
+                f"Once the schedule is published they close {core.buffer_text()} before the first fight, which is usually later.")
+    return f"Picks close {core.buffer_text()} before the first fight. Change or clear them until then."
 
 
 def _rounds(row, dist: dict) -> int:
@@ -184,7 +198,7 @@ def _sign_in_or_join(engine, invite_code: str, clock) -> None:
             <div class="aside">Pick the winner, the method and the round for each fight on the next card, then see who out-thinks the model. It is just for fun, and nothing is wagered.</div></div>
             <div class="figs gm-steps">
               <div class="c"><div class="v">1</div><div class="l">Pick</div><div class="small muted">Winner, how it ends and the round, for every fight.</div></div>
-              <div class="c"><div class="v">2</div><div class="l">Lock</div><div class="small muted">Picks close at 00:00 UTC on fight day and are revealed then.</div></div>
+              <div class="c"><div class="v">2</div><div class="l">Lock</div><div class="small muted">Picks close before the first fight and are revealed then.</div></div>
               <div class="c"><div class="v">3</div><div class="l">Score</div><div class="small muted">Points for being right, and a bonus for beating the model.</div></div>
             </div>""")
     tab_in, tab_join = st.tabs(["Sign in", "Join"])
@@ -238,13 +252,22 @@ def _picks_tab(q, engine, player: dict, clock) -> None:
     now = clock()
     for kind, text in st.session_state.pop("g_flash", []):
         {"success": st.success, "error": st.error, "warning": st.warning}[kind](text)
-    every = _safe(q, OPEN_SQL, {"t": now.date()}, columns=OPEN_COLS)
+    every = _safe(q, OPEN_SQL, {"t": (now - timedelta(days=1)).date()}, columns=OPEN_COLS)          # a card can still be open on its event date (or just after it, in UTC)
     if every.empty:
         _ufc('<div class="gm-empty"><div class="disp">No card is open for picks</div><div class="note">A card opens for picks as soon as the one before it closes, '
-             'and every card closes at 00:00 UTC on the day of the event. Check back soon.</div></div>')
+             f'and every card closes {core.buffer_text()} before its first fight. Check back soon.</div></div>')
         return
+    starts = _starts(q)
     dates = every.event_date.map(lambda d: pd.Timestamp(d).date())
+    open_now = dates.map(lambda d: now < core.closes_at(d, starts.get(d)))          # a card can close before its event date (a card that starts the evening before, in UTC)
+    every, dates = every[open_now], dates[open_now]
+    if every.empty:
+        _ufc('<div class="gm-empty"><div class="disp">No card is open for picks</div><div class="note">The next card opens for picks as soon as it is announced, '
+             f'and every card closes {core.buffer_text()} before its first fight. Check back soon.</div></div>')
+        return
     first = dates.min()
+    first_start = starts.get(first)
+    closes = core.closes_at(first, first_start)
     bouts = every[dates == first]                                                   # only the NEXT card; the one after it opens when this one closes
     later = every[dates > first].drop_duplicates(["event_date", "event_name"])
     model = _model_winners(q).set_index("bout_id")
@@ -255,9 +278,9 @@ def _picks_tab(q, engine, player: dict, clock) -> None:
         when = "Tomorrow" if days == 1 else f"In {days} days"
         saved_n = int(grp.bout_id.isin(saved.index).sum())
         _ufc(f'<div class="hero gm-hero"><div class="kicker mono">Next card &middot; {esc(when)}</div><h1>{esc(ename)}</h1></div>'
-             f'<div class="facts"><span><b>{len(grp)}</b> fights</span><span>Picks close <b>{esc(_cutoff_text(first))}</b></span>'
-             f'<span>Closes in <b>{esc(_countdown(first, now))}</b></span><span><b>{saved_n}</b> of {len(grp)} saved</span></div>'
-             '<div class="aside">Change or clear your picks until the card closes. Nobody sees anyone else\'s picks until then.</div>')
+             f'<div class="facts"><span><b>{len(grp)}</b> fights</span><span>Picks close <b>{esc(_cutoff_text(closes))}</b></span>'
+             f'<span>Closes in <b>{esc(_countdown(closes, now))}</b></span><span><b>{saved_n}</b> of {len(grp)} saved</span></div>'
+             f'<div class="aside">{esc(_close_reason(first, first_start))} Nobody sees anyone else\'s picks until then.</div>')
         specs, unsaved, incomplete = [], 0, 0
         for b in grp.itertuples():
             rounds = _rounds(b, dist.scheduled_rounds.to_dict() if len(dist) else {})
@@ -304,7 +327,7 @@ def _picks_tab(q, engine, player: dict, clock) -> None:
             problems = []
             for b, rounds, kw, km, kr in specs:
                 w = st.session_state.get(kw)
-                bout = {"bout_id": b.bout_id, "status": "scheduled", "event_date": first, "fighter_a": b.fighter_a, "fighter_b": b.fighter_b, "scheduled_rounds": rounds}
+                bout = {"bout_id": b.bout_id, "status": "scheduled", "event_date": first, "first_start": first_start, "fighter_a": b.fighter_a, "fighter_b": b.fighter_b, "scheduled_rounds": rounds}
                 if w is None:
                     if b.bout_id in saved.index:                                   # cleared on screen: remove it, so what you see is what is saved
                         err = game_db.delete_pick(engine, player["player_id"], bout, clock())
@@ -376,7 +399,10 @@ def _leaderboard_tab(q, engine, player: dict, scored: pd.DataFrame, clock) -> No
 
 def _reveal(q, engine, clock) -> None:
     """Everyone's picks for cards that have closed (hidden until then so nobody can copy a friend)."""
-    closed = _safe(q, CLOSED_SQL, {"t": clock().date()}, columns=["bout_id", "event_name", "event_date", "bout_order", "fighter_a", "fighter_b"])
+    now = clock()
+    closed = _safe(q, CLOSED_SQL, {"t": (now + timedelta(days=2)).date()}, columns=["bout_id", "event_name", "event_date", "bout_order", "fighter_a", "fighter_b"])
+    starts = _starts(q)
+    closed = closed[closed.event_date.map(lambda d: now >= core.closes_at(pd.Timestamp(d).date(), starts.get(pd.Timestamp(d).date())))] if not closed.empty else closed
     picks = game_db.all_picks(engine)
     if closed.empty or picks.empty:
         return
@@ -422,7 +448,7 @@ def _my_results_tab(scored: pd.DataFrame, player: dict) -> None:
 
 def _how_tab(engine, player: dict, clock) -> None:
     _ufc("""<div class="two"><div><span class="k">Pick</span>The winner, how it ends and, for a finish, the round. Up to 3 points a fight.</div>
-            <div><span class="k">Lock</span>Picks close at 00:00 UTC on fight day and everyone's picks are revealed.</div>
+            <div><span class="k">Lock</span>Picks close 6 hours before the first fight and everyone's picks are revealed.</div>
             <div><span class="k">Beat the model</span>Score +1 each time you are right and the model is wrong. Copying it scores 0.</div></div>""")
     with st.expander("The fine print"):
         st.markdown(FINE_PRINT)

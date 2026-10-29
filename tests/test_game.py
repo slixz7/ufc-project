@@ -55,11 +55,34 @@ def test_the_invite_code_comparison_forgives_case_and_spaces_but_never_an_empty_
 BOUT = {"bout_id": "b1", "status": "scheduled", "event_date": EVENT, "fighter_a": "Alex One", "fighter_b": "Ben Two", "scheduled_rounds": 3}
 
 
-def test_picks_close_at_midnight_utc_on_event_day():
-    assert core.cutoff(EVENT) == datetime(2026, 10, 31, tzinfo=timezone.utc)
-    assert core.picks_open(EVENT, datetime(2026, 10, 30, 23, 59, 59, tzinfo=timezone.utc))
-    assert not core.picks_open(EVENT, datetime(2026, 10, 31, 0, 0, 0, tzinfo=timezone.utc))                # the instant it closes
+def test_picks_close_six_hours_before_the_first_fight_and_with_no_start_time_at_1800_utc_the_day_before():
+    assert core.PICK_BUFFER == timedelta(hours=6) and core.buffer_text() == "6 hours"
+    assert core.cutoff(EVENT) == datetime(2026, 10, 31, tzinfo=timezone.utc)                                   # the reference point: 00:00 UTC on the event date
+    fallback = datetime(2026, 10, 30, 18, 0, tzinfo=timezone.utc)
+    assert core.closes_at(EVENT) == fallback                                                                    # no start time known: six hours before that reference point
+    assert core.picks_open(EVENT, fallback - timedelta(seconds=1)) and not core.picks_open(EVENT, fallback)     # the instant it closes
     assert not core.picks_open(EVENT, datetime(2026, 11, 1, tzinfo=timezone.utc))
+
+
+def test_every_card_closes_six_hours_before_its_first_fight_whatever_time_zone_it_is_in():
+    utc = timezone.utc
+    sydney, d = datetime(2026, 1, 30, 22, 0, tzinfo=utc), date(2026, 1, 31)                                    # UFC 325: the first fight was the evening BEFORE its event date, in UTC
+    assert core.closes_at(d, sydney) == datetime(2026, 1, 30, 16, 0, tzinfo=utc)
+    assert core.closes_at(date(2026, 10, 31), datetime(2026, 10, 31, 20, 0, tzinfo=utc)) == datetime(2026, 10, 31, 14, 0, tzinfo=utc)     # a US card closes the MORNING of its day, not the evening before
+    assert core.closes_at(date(2026, 10, 31), datetime(2026, 10, 31, 13, 45, tzinfo=utc)) == datetime(2026, 10, 31, 7, 45, tzinfo=utc)    # the real Oct 31 card
+    assert core.closes_at(d, pd.Timestamp("2026-01-30 22:00:00")) == core.closes_at(d, pd.Timestamp("2026-01-30 22:00:00+00:00")) == core.closes_at(d, "2026-01-30T23:00:00+01:00")   # naive, aware and offset times agree
+    assert core.closes_at(d, None) == core.closes_at(d, float("nan")) == datetime(2026, 1, 30, 18, 0, tzinfo=utc)                          # no start time: the fallback
+    assert core.closes_at(d) < sydney and core.closes_at(date(2026, 10, 31)) < datetime(2026, 10, 31, 13, 0, tzinfo=utc)                    # and the fallback is before ANY card's first fight
+    assert core.picks_open(d, datetime(2026, 1, 30, 15, 59, 59, tzinfo=utc), sydney) and not core.picks_open(d, datetime(2026, 1, 30, 16, 0, tzinfo=utc), sydney)
+
+
+def test_the_server_refuses_a_pick_after_the_close_even_though_the_event_date_has_not_arrived(db):
+    p = _join(db)
+    bout = {**BOUT, "event_date": date(2026, 1, 31), "first_start": datetime(2026, 1, 30, 22, 0, tzinfo=timezone.utc)}
+    assert game_db.save_pick(db, p["player_id"], bout, "Alex One", "KO/TKO", 1, datetime(2026, 1, 30, 15, 59, tzinfo=timezone.utc)) is None
+    assert "closed" in game_db.save_pick(db, p["player_id"], bout, "Ben Two", "Decision", None, datetime(2026, 1, 30, 16, 1, tzinfo=timezone.utc))
+    assert "closed" in game_db.delete_pick(db, p["player_id"], bout, datetime(2026, 1, 30, 16, 1, tzinfo=timezone.utc))      # and a pick can no longer be removed either
+    assert game_db.my_picks(db, p["player_id"]).pick_name.tolist() == ["Alex One"]
 
 
 def test_every_kind_of_invalid_pick_is_refused_with_a_reason():

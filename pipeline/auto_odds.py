@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import numpy as np
@@ -12,6 +12,7 @@ import pandas as pd
 import requests
 import sqlalchemy as sa
 
+import game_core
 import model_v3
 from auto_common import Report, UA
 from auto_names import _pair_sim, name_sim
@@ -19,6 +20,10 @@ from auto_names import _pair_sim, name_sim
 
 ODDS_URL = "https://api.the-odds-api.com/v4/sports/mma_mixed_martial_arts/odds"
 SNAPSHOT_GAP_HOURS = 3     # a bout gets at most one line snapshot per this many hours (so a repeated run adds nothing)
+SHARED_TIME_MARGIN = timedelta(hours=5)       # when the earliest time the feed lists may be the MAIN card's (every fight shares one time, or only part of the card is listed yet), the early prelims are hours earlier
+PLAUSIBLE_START = timedelta(days=2)           # a start time further than this from the event date is a feed glitch, and is ignored
+EVENT_STARTS_DDL = """CREATE TABLE IF NOT EXISTS event_starts (
+    event_date DATE PRIMARY KEY, first_start TIMESTAMPTZ NOT NULL, bouts INTEGER, distinct_times INTEGER, updated_at TIMESTAMPTZ)"""
 ODDS_DATASET_REPO = "https://github.com/nlbair/ufc-data.git"
 
 
@@ -123,6 +128,58 @@ SNAPSHOT_DDL = [
 ]
 
 
+def _utc(value) -> datetime:
+    """Whatever the database or the feed gives (aware, naive or text) as a timezone-aware UTC datetime."""
+    t = pd.Timestamp(value)
+    return (t.tz_localize("UTC") if t.tzinfo is None else t.tz_convert("UTC")).to_pydatetime()
+
+
+def event_start_rows(snaps: list[dict], card_sizes: dict | None = None) -> list[dict]:
+    """One row per event date: when its first fight is expected to start, from the start times the odds feed gave for that card's bouts.
+    The earliest time wins. But that time may only be the main card's, in two cases: every bout has the SAME time, or the feed lists only PART of
+    the card (`card_sizes` is how many bouts we have scheduled for each date; weeks out the feed shows just the top fights). Then SHARED_TIME_MARGIN
+    is taken off it. For a US card the result is still later than 00:00 UTC on event day, so nothing changes there."""
+    by: dict = {}
+    for s in snaps:
+        by.setdefault(pd.Timestamp(s["d"]).date(), []).append(_utc(s["ct"]))
+    rows = []
+    for d, times in sorted(by.items()):
+        midnight = datetime(d.year, d.month, d.day, tzinfo=timezone.utc)
+        ok = [t for t in times if abs(t - midnight) <= PLAUSIBLE_START]
+        if not ok:
+            continue
+        first, distinct = min(ok), len(set(ok))
+        size = (card_sizes or {}).get(d)
+        margin = distinct == 1 or (size is not None and len(ok) < size)
+        rows.append({"event_date": d, "first_start": first - SHARED_TIME_MARGIN if margin else first, "bouts": len(ok), "distinct_times": distinct, "card_size": size, "margin": margin})
+    return rows
+
+
+def ensure_event_starts(engine) -> None:
+    with engine.begin() as conn:
+        conn.exec_driver_sql(EVENT_STARTS_DDL)
+
+
+def save_event_starts(engine, rows: list[dict], now: datetime) -> int:
+    """Upsert the start times, returning how many were written. While a card is still open its start time follows the best current estimate, in either
+    direction (a card only partly listed is estimated early, and the estimate relaxes as the rest is listed). Once a card's picks have closed it is left
+    alone: a closed card must never reopen, and the early fights drop out of the feed once they start."""
+    ensure_event_starts(engine)
+    written = 0
+    with engine.begin() as conn:
+        for r in rows:
+            old = conn.execute(sa.text("SELECT first_start FROM event_starts WHERE event_date = :d"), {"d": r["event_date"]}).scalar()
+            if now >= game_core.closes_at(r["event_date"], None if old is None else _utc(old)):
+                continue                                           # already closed (by its recorded start, or by the rule for an unknown start)
+            first = r["first_start"]
+            conn.execute(sa.text("""INSERT INTO event_starts (event_date, first_start, bouts, distinct_times, updated_at) VALUES (:d, :f, :b, :n, :t)
+                                    ON CONFLICT (event_date) DO UPDATE SET first_start = EXCLUDED.first_start, bouts = EXCLUDED.bouts,
+                                    distinct_times = EXCLUDED.distinct_times, updated_at = EXCLUDED.updated_at"""),
+                         {"d": r["event_date"], "f": first, "b": r["bouts"], "n": r["distinct_times"], "t": now})
+            written += 1
+    return written
+
+
 def ensure_snapshot_tables(engine) -> None:
     with engine.begin() as conn:
         for stmt in SNAPSHOT_DDL:
@@ -200,9 +257,11 @@ def step_odds(engine, today: date, rep: Report, dry_run: bool, save_raw: Path | 
         matched += 1
         shown.append(f"   {bout.event_date}  {bout.a} vs {bout.b}: {p_a:.0%} for {bout.a} (median of {n_books} book(s))")
         rows.append({"bout_id": bout.bout_id, "p": p_a, "src": f"the-odds-api median of {n_books} book(s), {now:%Y-%m-%d %H:%M} UTC"})
-    stored = 0
+    sizes = {pd.Timestamp(k).date(): int(v) for k, v in bouts.groupby("event_date").size().items()}
+    stored, starts = 0, event_start_rows(snaps, sizes)
     if not dry_run:
         ensure_snapshot_tables(engine)
+        save_event_starts(engine, starts, now)
         with engine.begin() as conn:
             for r in rows:
                 conn.execute(sa.text("""INSERT INTO upcoming_odds (bout_id, odds_a, odds_b, market_prob_a, source) VALUES (:b, NULL, NULL, :p, :s)
@@ -223,6 +282,18 @@ def step_odds(engine, today: date, rep: Report, dry_run: bool, save_raw: Path | 
     else:
         total = pd.read_sql(sa.text("SELECT COUNT(*) AS n, COUNT(DISTINCT bout_id) AS b, MIN(snapshot_at)::date AS d FROM odds_snapshots"), engine).iloc[0]
         lines.append(f"{stored} new line snapshots stored; the history now holds {int(total.n)} snapshots of {int(total.b)} bouts since {total.d}")
+    if starts:
+        lines.append(f"first-fight start times {'would be ' if dry_run else ''}recorded for {len(starts)} card(s) (the game closes picks {game_core.buffer_text()} before them): "
+                     + "; ".join(f"{r['event_date']} {r['first_start']:%H:%M} UTC ({r['bouts']} of {r['card_size']} fights listed{', with a 5-hour margin' if r['margin'] else ''})"
+                                 if r.get("card_size") else f"{r['event_date']} {r['first_start']:%H:%M} UTC" for r in starts[:6]))
+    for r in starts:                                               # a card close to its date that the feed lists only in part: its close time is a cautious estimate
+        if r.get("card_size") and r["bouts"] < r["card_size"] and today < r["event_date"] <= today + timedelta(days=3):
+            lines.append(f"only {r['bouts']} of {r['card_size']} fights are listed by the feed for the card on {r['event_date']}: its pick deadline is a cautious estimate until the rest are listed")
+    covered = {r["event_date"] for r in starts}
+    unknown = sorted({d for d in bouts.event_date if today < d <= today + timedelta(days=3) and d not in covered})
+    if unknown:                                                    # the case where the game's midnight-UTC rule could close a card's picks too late
+        lines.append("no first-fight start time from the odds feed yet for the card(s) on " + ", ".join(str(d) for d in unknown)
+                     + ": the game closes their picks at 18:00 UTC the day before the event until a start time is known")
     if show:
         lines += shown
     for a, b, p in lopsided:

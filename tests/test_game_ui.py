@@ -11,6 +11,7 @@ import sqlalchemy as sa
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "pipeline"))
 sys.path.insert(0, str(ROOT / "app"))
+import auto_odds  # noqa: E402
 import bout_results  # noqa: E402
 import game_db  # noqa: E402
 import model_distance  # noqa: E402
@@ -186,7 +187,7 @@ def test_a_pick_with_method_and_round_is_saved_and_comes_back_next_time(world):
     at = _run(me)
     text = _html(at)
     assert "MODEL PICK &middot; 55%" in text and "46%" not in text and "50%" in text and "5 rounds" in text and "Title" in text        # the model's pick, its distance chance, the rounds, the title tag
-    assert "Fri Oct 30, 5:00 PM Pacific (Sat Oct 31, 12:00 AM UTC)" not in text and "Fri Nov 13, 4:00 PM Pacific (Sat Nov 14, 12:00 AM UTC)" in text
+    assert "Fri Nov 13, 10:00 AM Pacific (Fri Nov 13, 6:00 PM UTC)" in text and "We do not have this card&#x27;s schedule yet" in text            # no start time recorded: 6 hours before 00:00 UTC on the event date
     at = _pick(at, "g_w_b1", "Ben Two")
     at = _pick(at, "g_m_b1", "KO/TKO")
     assert [o.content for o in at.segmented_control(key="g_r_b1").proto.options] == ["R1", "R2", "R3", "R4", "R5"]     # a 5-round fight offers rounds 1 to 5
@@ -256,6 +257,47 @@ def test_once_a_card_has_closed_its_picks_are_revealed_and_the_server_refuses_a_
     at = _run(world["ann"])
     assert "KO/TKO R3" in _html(at) and not [s for s in at.segmented_control if s.key == "g_w_b1"]            # revealed once it closes, and no longer pickable
     assert "closed" in game_db.save_pick(world["game"], world["ann"]["player_id"], bo_open, "Alex One", "KO/TKO", 1, late)       # and the server refuses a late pick even if the page were tricked
+
+
+def _set_start(world, event_date, first_start):
+    """Record a card's first-fight start time the way the daily odds step does."""
+    auto_odds.save_event_starts(world["read"], [{"event_date": pd.Timestamp(event_date).date(), "first_start": first_start, "bouts": 5, "distinct_times": 4}], NOW)
+
+
+def test_a_card_that_starts_early_in_utc_closes_before_its_event_date_reveals_its_picks_and_the_next_card_takes_over(world, monkeypatch):
+    me, _ = game_db.register(world["game"], "Cyd", "333333", True, NOW)
+    bout = {"bout_id": "b1", "status": "scheduled", "event_date": CARD_DATE, "fighter_a": "Alex One", "fighter_b": "Ben Two", "scheduled_rounds": 5}
+    game_db.save_pick(world["game"], world["bo"]["player_id"], bout, "Alex One", "KO/TKO", 3, NOW)                       # Bob's pick, hidden while the card is open
+    _set_start(world, CARD_DATE, datetime(2026, 11, 13, 22, 0, tzinfo=timezone.utc))                                  # first fight Fri 22:00 UTC, the evening BEFORE the event date (like UFC 325)
+    monkeypatch.setenv("G_NOW", datetime(2026, 11, 13, 15, 59, 0, tzinfo=timezone.utc).isoformat())
+    at = _run(me)
+    text = _html(at)
+    assert [s.key for s in at.segmented_control if s.key.startswith("g_w_")] == ["g_w_b1", "g_w_b2"]                  # still open, one minute before the close
+    assert "Fri Nov 13, 8:00 AM Pacific (Fri Nov 13, 4:00 PM UTC)" in text and "Closes in <b>1 min</b>" in text and "Picks close 6 hours before the first fight." in text
+    assert "KO/TKO R3" not in text
+    monkeypatch.setenv("G_NOW", datetime(2026, 11, 13, 16, 0, 0, tzinfo=timezone.utc).isoformat())
+    at = _run(me)
+    assert [s.key for s in at.segmented_control if s.key.startswith("g_w_")] == ["g_w_l1"]                           # closed, a day before its event date: the next card is offered
+    assert "KO/TKO R3" in _html(at) and any(CARD in e.label for e in at.expander)                                    # and the closed card's picks are revealed under its name
+    refused = game_db.save_pick(world["game"], me["player_id"], {**bout, "first_start": datetime(2026, 11, 13, 22, 0, tzinfo=timezone.utc)}, "Alex One", "KO/TKO", 1,
+                                datetime(2026, 11, 13, 16, 0, tzinfo=timezone.utc))
+    assert "closed" in refused
+
+
+def test_a_us_card_stays_open_into_its_event_day_and_an_unknown_start_is_said_plainly(world, monkeypatch):
+    me, _ = game_db.register(world["game"], "Cyd", "333333", True, NOW)
+    at = _run(me)                                                                                                    # no start time recorded for this card at all
+    assert "We do not have this card&#x27;s schedule yet" in _html(at) and "Fri Nov 13, 10:00 AM Pacific (Fri Nov 13, 6:00 PM UTC)" in _html(at)
+    _set_start(world, CARD_DATE, datetime(2026, 11, 14, 20, 0, tzinfo=timezone.utc))                                  # first fight Saturday 20:00 UTC (noon Pacific)
+    at = _run(me)
+    text = _html(at)
+    assert "Sat Nov 14, 6:00 AM Pacific (Sat Nov 14, 2:00 PM UTC)" in text and "do not have" not in text and "Picks close 6 hours before the first fight." in text
+    monkeypatch.setenv("G_NOW", datetime(2026, 11, 14, 13, 59, 0, tzinfo=timezone.utc).isoformat())                  # the card's own date, in UTC: still open (the old rule had closed it the day before)
+    at = _run(me)
+    assert [s.key for s in at.segmented_control if s.key.startswith("g_w_")] == ["g_w_b1", "g_w_b2"] and "Closes in <b>1 min</b>" in _html(at)
+    monkeypatch.setenv("G_NOW", datetime(2026, 11, 14, 14, 0, 0, tzinfo=timezone.utc).isoformat())
+    at = _run(me)
+    assert [s.key for s in at.segmented_control if s.key.startswith("g_w_")] == ["g_w_l1"]                           # six hours before the first fight: closed, and the next card takes over
 
 
 def test_the_leaderboards_score_the_closed_card_and_mark_you(world):

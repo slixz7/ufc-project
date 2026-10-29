@@ -2,7 +2,8 @@
 The friends' game: the rules, with no database and no web page in it, so every rule can be tested on its own.
 
 Players pick, for each fight on an open card: the winner, how it ends (KO/TKO, Submission or Decision) and, for a finish, the round.
-Picks close at 00:00 UTC on the day of the event. Two scores:
+Picks close PICK_BUFFER (6 hours) before the card's first fight starts, the same for every card. The first-fight time comes from the odds feed; when a
+card's time is not known yet, picks close at 18:00 UTC the day before its event date, which is safe for any card in the world. Two scores:
 
   Points          winner right +1; method right (winner also right) +1; round right (winner and method also right, a finish) +1.
   Versus the model  the winner call and the goes-the-distance call (a Decision pick means "goes the distance") are each scored as
@@ -17,7 +18,7 @@ import hashlib
 import hmac
 import os
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import numpy as np
 import pandas as pd
@@ -94,21 +95,39 @@ def invite_matches(entered, expected) -> bool:
 # ----------------------------------------------------------------------------------------------
 # picks
 # ----------------------------------------------------------------------------------------------
+PICK_BUFFER = timedelta(hours=6)                                              # picks close this long before the card's first fight starts, for every card
+
+
+def buffer_text() -> str:
+    h = int(PICK_BUFFER.total_seconds() // 3600)
+    return f"{h} hour{'s' if h != 1 else ''}"
+
+
 def cutoff(event_date) -> datetime:
-    """Picks close at 00:00 UTC on the day of the event."""
+    """00:00 UTC on the day of the event: the reference point when a card's first-fight time is not known."""
     d = pd.Timestamp(event_date).date()
     return datetime(d.year, d.month, d.day, tzinfo=timezone.utc)
 
 
-def picks_open(event_date, now: datetime) -> bool:
-    return now < cutoff(event_date)
+def closes_at(event_date, first_start=None) -> datetime:
+    """When picks close: PICK_BUFFER before the card's first fight starts (`first_start`). If that is not known yet, PICK_BUFFER before 00:00 UTC on
+    the event date (18:00 UTC the day before): earlier than any card in the world starts, so it is safe, and usually earlier than the real rule."""
+    if first_start is None or pd.isna(first_start):
+        return cutoff(event_date) - PICK_BUFFER
+    t = pd.Timestamp(first_start)
+    t = t.tz_localize("UTC") if t.tzinfo is None else t.tz_convert("UTC")
+    return t.to_pydatetime() - PICK_BUFFER
+
+
+def picks_open(event_date, now: datetime, first_start=None) -> bool:
+    return now < closes_at(event_date, first_start)
 
 
 def validate_pick(bout: dict, winner, method, rnd, now: datetime) -> tuple[str | None, int | None]:
     """(an error to show, or None) and the round to store. `bout` needs status, event_date, fighter_a, fighter_b and scheduled_rounds."""
     if bout.get("status") != "scheduled":
         return "That bout is no longer on the card.", None
-    if not picks_open(bout["event_date"], now):
+    if not picks_open(bout["event_date"], now, bout.get("first_start")):
         return "Picks for this card have closed.", None
     if winner not in (bout["fighter_a"], bout["fighter_b"]):
         return "Pick one of the two fighters.", None

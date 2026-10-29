@@ -188,3 +188,17 @@ def test_retiring_a_login_the_owner_made_locks_it_and_kills_its_password(pg):
     report = " | ".join(db_roles.retire_legacy(pg["owner"], role=n["legacy2"]))
     assert "can no longer log in" in report and "old connection string is dead" in report and "You can now safely delete" in report
     assert not _can_login(pg, n["legacy2"], "oldpw")
+
+
+def test_the_start_times_table_is_readable_by_the_site_login_but_not_writable_and_the_audit_still_passes(pg):
+    from datetime import datetime, timezone
+    site_url = db_roles.setup_reader(pg["owner"], role=pg["n"]["site"], rotate_password=True)                      # a current password (the earlier test rotated it)
+    auto_odds.save_event_starts(pg["owner"], [{"event_date": datetime(2026, 1, 31).date(), "first_start": datetime(2026, 1, 30, 22, 0, tzinfo=timezone.utc), "bouts": 3, "distinct_times": 3}],
+                                datetime(2026, 1, 28, 14, 17, tzinfo=timezone.utc))                                 # created later by the owner: readable through the default grants
+    site = sa.create_engine(sa.engine.make_url(site_url).set(drivername="postgresql+psycopg2"))
+    with site.connect() as c:
+        got = c.execute(sa.text("SELECT first_start FROM event_starts")).scalar()
+    assert got == datetime(2026, 1, 30, 22, 0, tzinfo=timezone.utc)                                                 # real timestamptz round trip
+    assert _refused(site, "INSERT INTO event_starts (event_date, first_start) VALUES ('2026-02-07', now())")
+    assert _refused(site, "UPDATE event_starts SET first_start = now()") and _refused(site, "DELETE FROM event_starts")
+    assert db_roles.audit_reader(pg["owner"], role=pg["n"]["site"]) == []                                           # a public table, not a private one
