@@ -55,6 +55,42 @@ def test_the_shipped_alias_file_contains_that_case_and_loads_cleanly():
         assert card == card.strip() and feed_key == upcoming.norm(feed_key) and feed_key != upcoming.norm(card)                   # no pointless alias: the two spellings differ
 
 
+def test_the_second_real_case_the_feed_drops_a_second_surname(tmp_path=None):
+    nov7 = bouts(("Jonny Parsons", "José Henrique Souza", CARD), ("Alpha One", "Bravo Two", CARD))
+    assert auto_names.name_sim("José Henrique", "José Henrique Souza") < 0.88                                       # why it failed: 0.81
+    assert auto_odds.match_line_to_bout("Jonny Parsons", "José Henrique", CARD, nov7, {}) is None
+    assert auto_odds.classify_unmatched("Jonny Parsons", "José Henrique", CARD, nov7, {}) == "card_changed"         # the CHECK THE CARD warning of 2026-10-30
+    hit = auto_odds.match_line_to_bout("Jonny Parsons", "José Henrique", CARD, nov7)                                 # with the shipped alias file
+    assert hit is not None and hit[0].a == "Jonny Parsons" and hit[0].b == "José Henrique Souza" and hit[1] is True
+    swapped = auto_odds.match_line_to_bout("José Henrique", "Jonny Parsons", CARD, nov7)
+    assert swapped is not None and swapped[0].bout_id == "b0" and swapped[1] is False
+    assert auto_odds.match_line_to_bout("Jose Henrique", "Jonny Parsons", CARD, nov7) is not None                  # the feed may or may not keep the accent
+    assert auto_odds.match_line_to_bout("José Henrique", "Someone Else", CARD, nov7) is None                        # and an alias never rescues a different opponent
+
+
+def test_accented_names_survive_the_file_and_a_windows_editors_start_of_file_mark(tmp_path):
+    text = "feed_name,card_name\nJosé Henrique,José Henrique Souza\n"
+    plain, with_bom = tmp_path / "plain.csv", tmp_path / "bom.csv"
+    plain.write_bytes(text.encode("utf-8"))
+    with_bom.write_bytes(b"\xef\xbb\xbf" + text.encode("utf-8"))                                                    # what Notepad's "UTF-8 with BOM" writes
+    for f in (plain, with_bom):
+        assert auto_names.load_odds_aliases(f) == {"jose henrique": "José Henrique Souza"}, f.name
+
+
+def test_a_file_saved_in_the_wrong_encoding_says_so_instead_of_failing_obscurely(tmp_path):
+    f = tmp_path / "old.csv"
+    f.write_bytes("feed_name,card_name\nJosé Henrique,José Henrique Souza\n".encode("cp1252"))                       # what an old-style command writes on Windows
+    with pytest.raises(ValueError, match="must be saved as UTF-8"):
+        auto_names.load_odds_aliases(f)
+
+
+def test_the_shipped_file_is_plain_utf8_with_both_known_cases():
+    raw = (ROOT / "upcoming" / "odds_aliases.csv").read_bytes()
+    assert not raw.startswith(b"\xef\xbb\xbf") and raw.decode("utf-8")                                              # no mark, valid UTF-8
+    aliases = auto_names.load_odds_aliases()
+    assert aliases["seok hyun ko"] == "Ko Seok-hyeon" and aliases["jose henrique"] == "José Henrique Souza"
+
+
 # ---------------------------------------------------------------------------------------------- what an alias must NOT do
 def test_an_alias_does_not_help_a_line_whose_other_fighter_or_date_does_not_fit():
     aliases = {"seok hyun ko": "Ko Seok-hyeon"}

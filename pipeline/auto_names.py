@@ -93,7 +93,10 @@ def load_odds_aliases(path: Path | None = None) -> dict[str, str]:
     path = Path(path or ODDS_ALIASES_PATH)
     if not path.exists():
         return {}
-    df = pd.read_csv(path, dtype=str, keep_default_na=False, comment="#", skip_blank_lines=True)
+    try:
+        df = pd.read_csv(path, dtype=str, keep_default_na=False, comment="#", skip_blank_lines=True, encoding="utf-8-sig")      # utf-8-sig: a Windows editor's invisible start-of-file mark is fine
+    except UnicodeDecodeError:
+        raise ValueError(f"{path.name}: must be saved as UTF-8 (in Notepad: File > Save As > Encoding: UTF-8); names with accents were probably saved in another encoding")
     if list(df.columns) != ["feed_name", "card_name"]:
         raise ValueError(f"{path.name}: the first line must be exactly feed_name,card_name (found {list(df.columns)})")
     out: dict[str, str] = {}
