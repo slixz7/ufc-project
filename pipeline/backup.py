@@ -20,7 +20,9 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
+import io
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -57,13 +59,57 @@ def format_frame(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _integer_columns(engine, table: str) -> set[str]:
+    return {c["name"] for c in sa.inspect(engine).get_columns(table) if isinstance(c["type"], sa.Integer)}
+
+
 def read_table(engine, table: str) -> pd.DataFrame:
     columns = [c["name"] for c in sa.inspect(engine).get_columns(table)]
-    return format_frame(pd.read_sql(sa.text(f'SELECT * FROM "{table}" ORDER BY {_order_by(engine, table, columns)}'), engine))
+    df = pd.read_sql(sa.text(f'SELECT * FROM "{table}" ORDER BY {_order_by(engine, table, columns)}'), engine)
+    for c in _integer_columns(engine, table) & set(df.columns):
+        df[c] = df[c].astype("Int64")            # an integer column with a blank in it is read back as decimals (1.0); write 1, and leave the blank blank
+    return format_frame(df)
 
 
 def _sha256(path: Path) -> str:
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def _file_bytes(path: Path, expected_sha256: str | None) -> bytes:
+    """The file's bytes as the backup wrote them. Git for Windows rewrites every line ending as \\r\\n when it clones, which changes every checksum although
+    nothing is damaged; if the file only matches its checksum once those are put back, that is what it is, and the original bytes are returned."""
+    raw = Path(path).read_bytes()
+    if expected_sha256 is None or b"\r\n" not in raw or hashlib.sha256(raw).hexdigest() == expected_sha256:
+        return raw
+    fixed = raw.replace(b"\r\n", b"\n")
+    return fixed if hashlib.sha256(fixed).hexdigest() == expected_sha256 else raw
+
+
+def _manifest_sha(directory: Path, table: str) -> str | None:
+    f = Path(directory) / MANIFEST
+    if not f.exists():
+        return None
+    for row in csv.DictReader(open(f, encoding="utf-8", newline="")):
+        if row["table"] == table:
+            return row["sha256"]
+    return None
+
+
+def read_backup_csv(directory: Path, table: str, **kwargs) -> pd.DataFrame:
+    """A backed-up table as a frame, reading it the way it was written even if git has changed its line endings."""
+    raw = _file_bytes(Path(directory) / f"{table}.csv", _manifest_sha(directory, table))
+    return pd.read_csv(io.BytesIO(raw), **kwargs)
+
+
+def converted_files(directory: Path) -> list[str]:
+    """Tables whose files have had their line endings changed by git (they are accepted: only the line endings differ)."""
+    d = Path(directory)
+    out = []
+    for row in csv.DictReader(open(d / MANIFEST, encoding="utf-8", newline="")) if (d / MANIFEST).exists() else []:
+        f = d / f"{row['table']}.csv"
+        if f.exists() and _sha256(f) != row["sha256"] and _file_bytes(f, row["sha256"]) != f.read_bytes():
+            out.append(row["table"])
+    return out
 
 
 def dump(engine, out: Path = OUT, exclude=EXCLUDE) -> list[dict]:
@@ -95,9 +141,9 @@ def verify(directory: Path) -> list[str]:
         f = d / f"{t}.csv"
         if not f.exists():
             problems.append(f"{t}: the file is missing")
-        elif _sha256(f) != row["sha256"]:
+        elif hashlib.sha256(_file_bytes(f, row["sha256"])).hexdigest() != row["sha256"]:
             problems.append(f"{t}: the file does not match the manifest (changed or damaged)")
-        elif len(pd.read_csv(f, dtype=str, keep_default_na=False)) != int(row["rows"]):
+        elif len(pd.read_csv(io.BytesIO(_file_bytes(f, row["sha256"])), dtype=str, keep_default_na=False)) != int(row["rows"]):
             problems.append(f"{t}: the row count differs from the manifest")
     problems += [f"{f.name}: not listed in the manifest" for f in sorted(d.glob("*.csv")) if f.name != MANIFEST and f.name not in listed]
     return problems
@@ -117,7 +163,9 @@ def restore_table(engine, directory: Path, table: str) -> int:
     with engine.connect() as conn:
         if conn.execute(sa.text(f'SELECT COUNT(*) FROM "{table}"')).scalar():
             raise ValueError(f"{table}: the table already has rows; restore only loads into an empty table")
-    df = pd.read_csv(d / f"{table}.csv", dtype=str, keep_default_na=False).replace({"": None})      # a blank cell was NULL
+    df = read_backup_csv(d, table, dtype=str, keep_default_na=False).replace({"": None})              # a blank cell was NULL
+    for c in _integer_columns(engine, table) & set(df.columns):                                    # backups made before the fix wrote an integer with a blank in its column as 1.0
+        df[c] = df[c].map(lambda v: v if v is None else re.sub(r"\.0+$", "", v))
     unknown = set(df.columns) - {c["name"] for c in insp.get_columns(table)}
     if unknown:
         raise ValueError(f"{table}: the backup has columns the table does not: {sorted(unknown)}")
