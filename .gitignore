@@ -12,3 +12,5 @@ raw/
 
 # a demo database made with --data-dir inside the project (by default it lives in the system cache folder instead)
 demo/.data/
+# copies of files the update tool replaced
+.update_backup/

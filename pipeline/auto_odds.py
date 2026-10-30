@@ -16,7 +16,7 @@ import game_core
 import model_distance_v2
 import model_v3
 from auto_common import Report, UA
-from auto_names import _pair_sim, name_sim
+from auto_names import _pair_sim, canonical_feed_name, load_odds_aliases, name_sim
 
 
 ODDS_URL = "https://api.the-odds-api.com/v4/sports/mma_mixed_martial_arts/odds"
@@ -65,8 +65,9 @@ def event_consensus(ev: dict):
     return home, away, float(np.median(ps)), len(ps)
 
 
-def match_line_to_bout(home: str, away: str, commence: date, bouts: pd.DataFrame):
-    """Return (bout row, home_is_a) for the best-matching announced bout, or None."""
+def match_line_to_bout(home: str, away: str, commence: date, bouts: pd.DataFrame, aliases: dict[str, str] | None = None):
+    """Return (bout row, home_is_a) for the best-matching announced bout, or None. `aliases` (upcoming/odds_aliases.csv) maps a feed's spelling of a name to the card's."""
+    home, away = canonical_feed_name(home, aliases), canonical_feed_name(away, aliases)
     best, best_s = None, 0.0
     for r in bouts.itertuples():
         if abs((r.event_date - commence).days) > 1:
@@ -79,10 +80,11 @@ def match_line_to_bout(home: str, away: str, commence: date, bouts: pd.DataFrame
     return best, name_sim(home, best.a) >= name_sim(home, best.b)
 
 
-def classify_unmatched(home: str, away: str, commence: date, bouts: pd.DataFrame) -> str:
+def classify_unmatched(home: str, away: str, commence: date, bouts: pd.DataFrame, aliases: dict[str, str] | None = None) -> str:
     """The Odds API's MMA feed also lists other promotions and rumoured or exhibition matchups, so most lines that match
     none of our bouts are simply not UFC. A line only matters when one of its fighters IS on a saved UFC bout within a day
     of it but against someone else (a late replacement opponent): 'card_changed'. Everything else is 'ignored'."""
+    home, away = canonical_feed_name(home, aliases), canonical_feed_name(away, aliases)
     for r in bouts.itertuples():
         if abs((r.event_date - commence).days) > 1:
             continue
@@ -222,6 +224,12 @@ def step_odds(engine, today: date, rep: Report, dry_run: bool, save_raw: Path | 
                                            (SELECT COUNT(*) FROM upcoming_picks_v3 p WHERE p.bout_id = u.bout_id) AS locked
                                     FROM upcoming_fights u WHERE u.status = 'scheduled' AND u.event_date >= :t"""), engine, params={"t": today})
     matched, ignored, changed, lopsided, skipped_locked, rows, snaps, shown = 0, [], [], [], 0, [], [], []
+    try:
+        aliases = load_odds_aliases()
+    except ValueError as exc:                          # a typo in an optional file must not stop the job: say so, and carry on without it
+        rep.need(f"Odds: {exc}. Betting-feed name aliases are ignored until it is fixed.")
+        aliases = {}
+    aliased = []
     for ev in events:
         cons = event_consensus(ev)
         if cons is None:
@@ -234,9 +242,12 @@ def step_odds(engine, today: date, rep: Report, dry_run: bool, save_raw: Path | 
         if commence_dt <= now:
             continue                                  # already started: a line is no longer "before the fight"
         commence = commence_dt.date()
-        hit = match_line_to_bout(home, away, commence, bouts)
+        for spelled in (home, away):
+            if canonical_feed_name(spelled, aliases) != spelled:
+                aliased.append((spelled, canonical_feed_name(spelled, aliases)))
+        hit = match_line_to_bout(home, away, commence, bouts, aliases)
         if hit is None:
-            if classify_unmatched(home, away, commence, bouts) == "card_changed":
+            if classify_unmatched(home, away, commence, bouts, aliases) == "card_changed":
                 changed.append((home, away, commence))
             else:
                 ignored.append((home, away, commence))
@@ -303,6 +314,8 @@ def step_odds(engine, today: date, rep: Report, dry_run: bool, save_raw: Path | 
         lines.append(f"{len(ignored)} other lines ignored (other promotions, rumoured or not-yet-announced matchups)")
         if show:
             lines += [f"   ignored: {h} vs {a} ({c})" for h, a, c in ignored[:15]]
+    if aliased:
+        lines.append("feed spellings read through upcoming/odds_aliases.csv: " + "; ".join(f"{a!r} as {b!r}" for a, b in sorted(set(aliased))))
     for h, a, c in changed:
         lines.append(f"CHECK THE CARD: a line lists {h} vs {a} on {c}, but one of them is on our card against someone else")
         if (c - today).days <= 5:

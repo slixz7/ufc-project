@@ -5,10 +5,14 @@ import difflib
 import os
 import re
 from datetime import date
+from pathlib import Path
 
 import pandas as pd
 
 import upcoming
+
+ROOT = Path(__file__).resolve().parent.parent
+ODDS_ALIASES_PATH = ROOT / "upcoming" / "odds_aliases.csv"
 
 
 # ----------------------------------------------------------------------------------------------
@@ -80,6 +84,36 @@ def resolve_name(name: str, idx: pd.DataFrame, aliases: dict, remembered: dict |
         guess = ", ".join(idx[idx.norm.isin([top_name] + same_last[:2] + ([lk_name] if lk_top >= 0.90 else []))].fighter_name.unique()[:3])
         return {"status": "held", "url": None, "note": f"{name!r} is not an exact match; could be {guess}. Add a line to upcoming/aliases.csv"}
     return {"status": "new", "url": f"new:{key.replace(' ', '-')}", "note": "treated as a UFC debut (no similar fighter found)"}
+
+
+def load_odds_aliases(path: Path | None = None) -> dict[str, str]:
+    """upcoming/odds_aliases.csv: how a betting feed spells a fighter, and how our card spells the same person (columns feed_name,card_name).
+    Used ONLY when attaching a line to a bout that is already on the card (see name_sim). Lines starting with # are notes. A file that is wrong
+    (missing columns, a half-filled row, one feed name given two different card names) raises ValueError saying exactly what, never half-works."""
+    path = Path(path or ODDS_ALIASES_PATH)
+    if not path.exists():
+        return {}
+    df = pd.read_csv(path, dtype=str, keep_default_na=False, comment="#", skip_blank_lines=True)
+    if list(df.columns) != ["feed_name", "card_name"]:
+        raise ValueError(f"{path.name}: the first line must be exactly feed_name,card_name (found {list(df.columns)})")
+    out: dict[str, str] = {}
+    for i, r in enumerate(df.itertuples(index=False), start=2):
+        feed, card = r.feed_name.strip(), r.card_name.strip()
+        if not feed and not card:
+            continue
+        if not feed or not card:
+            raise ValueError(f"{path.name}, row {i}: both feed_name and card_name are needed (found {feed!r} and {card!r})")
+        key = upcoming.norm(feed)
+        if out.get(key, card) != card:
+            raise ValueError(f"{path.name}, row {i}: {feed!r} is given two different card names ({out[key]!r} and {card!r})")
+        out[key] = card
+    return out
+
+
+def canonical_feed_name(name: str, aliases: dict[str, str] | None = None) -> str:
+    """The card's spelling for a feed's spelling when the alias file has one, otherwise the name unchanged."""
+    table = load_odds_aliases() if aliases is None else aliases
+    return table.get(upcoming.norm(name), name)
 
 
 def name_sim(x: str, y: str) -> float:

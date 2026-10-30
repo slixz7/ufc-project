@@ -1,0 +1,5 @@
+# How the betting feed (The Odds API) spells a fighter, and how our card spells the same person.
+# Add a line only when a run reports "CHECK THE CARD" and the two names are really one fighter (a different spelling, the family name first).
+# It is used only to attach a line to a bout that is already on the card, on a nearby date, with the other fighter matching too.
+feed_name,card_name
+Seok Hyun Ko,Ko Seok-hyeon
