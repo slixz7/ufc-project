@@ -170,7 +170,7 @@ def _seed_players(engine, cards: dict, today: date, seed: int, log) -> None:
                 if err:
                     raise BuildError(f"demo pick refused: {err}")
     u1 = cards["U1"]
-    now = datetime.now(timezone.utc)
+    now = pretend_now(u1.date)                                            # the build runs on its own pretend clock, never the real one: its result must not depend on when it is run
     for nick, _ in PLAYERS[:3]:                                           # a few picks on the next card, so the page shows saved and unsaved fights
         for b in _bouts(engine, u1.csv.event_name.iloc[0]).itertuples():
             if rnd.random() < 0.55:
@@ -179,6 +179,11 @@ def _seed_players(engine, cards: dict, today: date, seed: int, log) -> None:
                 game_db.save_pick(engine, players[nick]["player_id"], {"bout_id": b.bout_id, "status": "scheduled", "event_date": b.event_date, "fighter_a": b.a, "fighter_b": b.b,
                                                                        "scheduled_rounds": rounds}, rnd.choice([b.a, b.b]), m, None if m == "Decision" else rnd.randint(1, rounds), now)
     log(f"  {len(PLAYERS)} fictional players with picks (nickname + PIN {PLAYER_PIN}); the invite code is '{INVITE_CODE}'")
+
+
+def pretend_now(next_card: date) -> datetime:
+    """The moment the demo pretends it is: noon UTC two days before its next card, so that card is open for picks and its start time can be recorded."""
+    return datetime.combine(next_card - timedelta(days=2), datetime.min.time(), tzinfo=timezone.utc) + timedelta(hours=12)
 
 
 def build(url: str, today: date | None = None, size: str = "normal", seed: int = 7, log=print) -> dict:
@@ -282,7 +287,7 @@ def build(url: str, today: date | None = None, size: str = "normal", seed: int =
         starts = [{"event_date": cards["U1"].date, "first_start": datetime.combine(cards["U1"].date, datetime.min.time(), tzinfo=timezone.utc) + timedelta(hours=19), "bouts": 10, "distinct_times": 6},
                   {"event_date": cards["U2"].date, "first_start": datetime.combine(cards["U2"].date, datetime.min.time(), tzinfo=timezone.utc) + timedelta(hours=18), "bouts": 9, "distinct_times": 5},
                   {"event_date": cards["U3"].date, "first_start": datetime.combine(cards["U3"].date - timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc) + timedelta(hours=22), "bouts": 10, "distinct_times": 6}]
-        auto_odds.save_event_starts(engine, starts, datetime.now(timezone.utc))
+        auto_odds.save_event_starts(engine, starts, pretend_now(cards["U1"].date))
         log("Setting up the game and the two restricted database logins ...")
         reader, game = login_names(engine.url.database)
         site_url = db_roles.setup_reader(engine, role=reader, rotate_password=True)      # on a rebuild the logins exist already: always issue fresh passwords

@@ -8,7 +8,7 @@ import re
 import sys
 import uuid
 from contextlib import contextmanager
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import numpy as np
@@ -32,7 +32,8 @@ except ImportError:
 needs_streamlit = pytest.mark.skipif(not HAVE_STREAMLIT, reason="Streamlit is not installed here")
 ADMIN_URL = os.getenv("TEST_PG_ADMIN_URL")
 needs_postgres = pytest.mark.skipif(not ADMIN_URL, reason="no test Postgres server (set TEST_PG_ADMIN_URL)")
-TODAY = date(2026, 10, 29)                       # a Thursday
+TODAY = date(2026, 10, 29)                       # a Thursday: for the tests of the generator and the launcher, which never read the real clock
+REAL_TODAY = datetime.now(timezone.utc).date()   # for the demos the real app is driven against: the app reads the real clock, so the demo must be built relative to it
 
 
 @pytest.fixture(scope="module")
@@ -210,7 +211,7 @@ def tiny_demo():
         pytest.skip("no test Postgres server (set TEST_PG_ADMIN_URL)")
     admin = _admin()
     name, url = _fresh_db(admin)
-    info = build_demo.build(url, today=TODAY, size="tiny", log=lambda *a: None)
+    info = build_demo.build(url, today=REAL_TODAY, size="tiny", log=lambda *a: None)         # the pages are driven by the real app, which reads the real clock: build on it
     info["owner_url"] = url
     yield info
     _drop(admin, name)
@@ -222,7 +223,7 @@ def small_demo():
         pytest.skip("no test Postgres server (set TEST_PG_ADMIN_URL)")
     admin = _admin()
     name, url = _fresh_db(admin)
-    info = build_demo.build(url, today=TODAY, size="small", log=lambda *a: None)
+    info = build_demo.build(url, today=REAL_TODAY, size="small", log=lambda *a: None)
     info["owner_url"] = url
     yield info
     _drop(admin, name)
@@ -271,6 +272,25 @@ def test_the_builder_only_ever_fills_an_empty_database(tiny_demo):
 
 
 @needs_postgres
+@pytest.mark.parametrize("pretend", [date(2025, 3, 5), date(2031, 6, 11)])
+def test_building_a_demo_does_not_depend_on_the_real_clock(pretend):
+    """A demo built for a date long past (or far ahead) must come out the same shape as one built for today: the build runs on its own pretend clock."""
+    admin = _admin()
+    name, url = _fresh_db(admin)
+    try:
+        info = build_demo.build(url, today=pretend, size="tiny", log=lambda *a: None)
+        eng = sa.create_engine(url.replace("postgresql://", "postgresql+psycopg2://", 1))
+        n = lambda sql: int(pd.read_sql(sa.text(sql), eng).iloc[0, 0])
+        assert info["built_on"] == str(pretend) and date.fromisoformat(info["next_card"]) >= pretend + timedelta(days=2)
+        assert n("SELECT COUNT(*) FROM event_starts") == 3                                                      # all three coming cards have a recorded start, whatever the real date is
+        assert n("SELECT COUNT(*) FROM game_picks") > 40 and n("SELECT COUNT(*) FROM upcoming_picks_v2 WHERE status = 'locked'") >= 25
+        assert n(f"SELECT COUNT(*) FROM game_picks p JOIN upcoming_fights u ON u.bout_id = p.bout_id WHERE u.event_date = DATE '{info['next_card']}'") >= 3        # the players' picks on the next card were accepted (it is open on the pretend clock)
+        eng.dispose()
+    finally:
+        _drop(admin, name)
+
+
+@needs_postgres
 def test_a_tiny_demo_is_built_by_the_real_pipeline_graded_and_audited(tiny_demo):
     eng = sa.create_engine(tiny_demo["owner_url"].replace("postgresql://", "postgresql+psycopg2://", 1))
     q = lambda sql: pd.read_sql(sa.text(sql), eng)
@@ -284,7 +304,7 @@ def test_a_tiny_demo_is_built_by_the_real_pipeline_graded_and_audited(tiny_demo)
     assert n("SELECT COUNT(*) FROM game_players") == 6 and n("SELECT COUNT(*) FROM game_picks") > 40 and n("SELECT COUNT(*) FROM event_starts") == 3
     assert n("SELECT COUNT(*) FROM upcoming_distance_v2") == 0 and n("SELECT COUNT(*) FROM fight_distance_v2") == 0                    # the market-informed distance model: tables exist, nothing faked
     assert n("SELECT COUNT(*) FROM upcoming_picks_v3") == 0 and n("SELECT COUNT(*) FROM fight_picks_v3") == 0 and tiny_demo["market_model"] is False   # too little history for the market model: skipped, not faked
-    assert q("SELECT value FROM demo_meta WHERE key = 'built_on'").iloc[0, 0] == str(TODAY)
+    assert q("SELECT value FROM demo_meta WHERE key = 'built_on'").iloc[0, 0] == str(REAL_TODAY) == tiny_demo["built_on"]
 
 
 @needs_postgres
