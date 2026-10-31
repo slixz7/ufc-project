@@ -38,7 +38,7 @@ ROOT = Path(__file__).resolve().parent.parent
 SQL_DIR = ROOT / "sql"
 # Tables that are in the real database and therefore in the backup, but that nothing in the project reads or writes any more. They stay in the backup (they are
 # small and harmless), they are not restored, and they do not fail the drill. Anything else without a setup step DOES fail it. Check the reason before adding one.
-LEGACY_TABLES = {"predictions": "an early table that no code, SQL or page uses any more (the project's tables are fight_predictions and upcoming_predictions)"}
+LEGACY_TABLES = {"predictions": "the first version's table of predictions for a block of 2025 fights (nine columns, an older design of fight_predictions), checked against the real table on 2026-10-30; no code, SQL, page or documented dashboard uses it"}
 BASE_TABLES = ("fights", "fighter_fights")          # created by the loader from the Kaggle data; here, from the backup
 HOSTED = ("neon.tech", "supabase", "amazonaws.com", "render.com", "elephantsql", "azure.com", "googleapis.com")
 
@@ -82,16 +82,20 @@ SCHEMA_STEPS = [
 ]
 
 
-# The two base tables, which no setup command creates (the loader, update_from_csv.py, fills them from the Kaggle data). Their layout is
-# written out here so a restore does not have to guess column types from text; a test checks it against the tables a real build produces.
+# The two base tables, which no setup command creates (the loader, update_from_csv.py, fills them from the Kaggle data). Their layout is written out here so a
+# restore does not have to guess column types from text. It is the layout of the real database, read from it on 2026-10-30 (column names, order, types and
+# indexes; whether a column may be empty was not read, and the date columns are left as before). A test checks it against the tables the demo builds.
 BASE_TABLES_DDL = """
 CREATE TABLE fights (fight_url TEXT PRIMARY KEY, event_date DATE NOT NULL, event_name TEXT, weight_class TEXT, title_fight BOOLEAN, num_rounds DOUBLE PRECISION,
-    result TEXT, finish_round DOUBLE PRECISION, finish_time TEXT);
-CREATE TABLE fighter_fights (fight_url TEXT NOT NULL, fighter_url TEXT NOT NULL, fighter_name TEXT, side INTEGER, won INTEGER, sig_land DOUBLE PRECISION,
-    sig_att DOUBLE PRECISION, td_land DOUBLE PRECISION, td_att DOUBLE PRECISION, sub_att DOUBLE PRECISION, kd DOUBLE PRECISION, ctrl_sec DOUBLE PRECISION,
-    dist_att DOUBLE PRECISION, clinch_att DOUBLE PRECISION, ground_att DOUBLE PRECISION, sig_absorbed DOUBLE PRECISION, opp_td_land DOUBLE PRECISION,
-    opp_td_att DOUBLE PRECISION, height_cm DOUBLE PRECISION, reach_cm DOUBLE PRECISION, stance TEXT, dob DATE);
+    result TEXT, finish_round BIGINT, finish_time TEXT);
+CREATE TABLE fighter_fights (fight_url TEXT NOT NULL, fighter_url TEXT NOT NULL, fighter_name TEXT, side BIGINT, won BIGINT, sig_land BIGINT,
+    sig_att BIGINT, td_land BIGINT, td_att BIGINT, sub_att BIGINT, kd BIGINT, ctrl_sec BIGINT,
+    dist_att DOUBLE PRECISION, clinch_att DOUBLE PRECISION, ground_att DOUBLE PRECISION, sig_absorbed BIGINT, opp_td_land BIGINT,
+    opp_td_att BIGINT, height_cm DOUBLE PRECISION, reach_cm DOUBLE PRECISION, stance TEXT, dob DATE);
 CREATE UNIQUE INDEX ux_ff_fight_fighter ON fighter_fights (fight_url, fighter_url);
+CREATE INDEX ix_ff_fighter ON fighter_fights (fighter_url);
+CREATE INDEX ix_ff_fight ON fighter_fights (fight_url);
+CREATE INDEX ix_fights_date ON fights (event_date);
 """
 
 

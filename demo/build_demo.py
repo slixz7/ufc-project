@@ -64,13 +64,18 @@ def login_names(database: str | None) -> tuple[str, str]:
 PLAYER_PIN = "123456"
 PLAYERS = [("demo_ann", .62), ("demo_bob", .58), ("demo_cyd", .55), ("demo_dee", .52), ("demo_eli", .50), ("demo_fay", .47)]
 DDL = """
+-- The two base tables, with the column types and indexes of the real database (read from it on 2026-10-30): the counts are bigint, the three attempt-type
+-- columns and the heights and reaches are decimals.
 CREATE TABLE fights (fight_url TEXT PRIMARY KEY, event_date DATE NOT NULL, event_name TEXT, weight_class TEXT, title_fight BOOLEAN, num_rounds DOUBLE PRECISION,
-    result TEXT, finish_round DOUBLE PRECISION, finish_time TEXT);
-CREATE TABLE fighter_fights (fight_url TEXT NOT NULL, fighter_url TEXT NOT NULL, fighter_name TEXT, side INTEGER, won INTEGER, sig_land DOUBLE PRECISION,
-    sig_att DOUBLE PRECISION, td_land DOUBLE PRECISION, td_att DOUBLE PRECISION, sub_att DOUBLE PRECISION, kd DOUBLE PRECISION, ctrl_sec DOUBLE PRECISION,
-    dist_att DOUBLE PRECISION, clinch_att DOUBLE PRECISION, ground_att DOUBLE PRECISION, sig_absorbed DOUBLE PRECISION, opp_td_land DOUBLE PRECISION,
-    opp_td_att DOUBLE PRECISION, height_cm DOUBLE PRECISION, reach_cm DOUBLE PRECISION, stance TEXT, dob DATE);
+    result TEXT, finish_round BIGINT, finish_time TEXT);
+CREATE TABLE fighter_fights (fight_url TEXT NOT NULL, fighter_url TEXT NOT NULL, fighter_name TEXT, side BIGINT, won BIGINT, sig_land BIGINT,
+    sig_att BIGINT, td_land BIGINT, td_att BIGINT, sub_att BIGINT, kd BIGINT, ctrl_sec BIGINT,
+    dist_att DOUBLE PRECISION, clinch_att DOUBLE PRECISION, ground_att DOUBLE PRECISION, sig_absorbed BIGINT, opp_td_land BIGINT,
+    opp_td_att BIGINT, height_cm DOUBLE PRECISION, reach_cm DOUBLE PRECISION, stance TEXT, dob DATE);
 CREATE UNIQUE INDEX ux_ff_fight_fighter ON fighter_fights (fight_url, fighter_url);
+CREATE INDEX ix_ff_fighter ON fighter_fights (fighter_url);
+CREATE INDEX ix_ff_fight ON fighter_fights (fight_url);
+CREATE INDEX ix_fights_date ON fights (event_date);
 CREATE TABLE demo_meta (key TEXT PRIMARY KEY, value TEXT);
 """
 

@@ -2,6 +2,7 @@
 The restore drill: rebuild the database from a backup into a throwaway database and check it. It must restore a real backup completely, notice every way a
 restore can go wrong, never touch anything real, and fail when the project grows a table that the recovery recipe does not know about.
 """
+import csv
 import os
 import shutil
 import sys
@@ -157,14 +158,66 @@ def test_a_known_legacy_table_is_kept_in_the_backup_but_does_not_fail_the_drill(
     assert {e["table"]: e["restored"] for e in result["tables"] if not e["legacy"]} == source["counts"]            # and every other table still came back exactly
 
 
+# What the real database's two base tables look like, read from it on 2026-10-30 (information_schema.columns and pg_indexes): column names in order, with types.
+REAL_COLUMNS = {
+    "fights": [("fight_url", "text"), ("event_date", "date"), ("event_name", "text"), ("weight_class", "text"), ("title_fight", "boolean"), ("num_rounds", "double precision"),
+               ("result", "text"), ("finish_round", "bigint"), ("finish_time", "text")],
+    "fighter_fights": [("fight_url", "text"), ("fighter_url", "text"), ("fighter_name", "text"), ("side", "bigint"), ("won", "bigint"), ("sig_land", "bigint"), ("sig_att", "bigint"),
+                       ("td_land", "bigint"), ("td_att", "bigint"), ("sub_att", "bigint"), ("kd", "bigint"), ("ctrl_sec", "bigint"), ("dist_att", "double precision"),
+                       ("clinch_att", "double precision"), ("ground_att", "double precision"), ("sig_absorbed", "bigint"), ("opp_td_land", "bigint"), ("opp_td_att", "bigint"),
+                       ("height_cm", "double precision"), ("reach_cm", "double precision"), ("stance", "text"), ("dob", "date")]}
+REAL_INDEXES = {"fights": {("ix_fights_date", ("event_date",), False)},                                                # (name, columns, unique); fights_pkey is the primary key
+                "fighter_fights": {("ix_ff_fighter", ("fighter_url",), False), ("ix_ff_fight", ("fight_url",), False), ("ux_ff_fight_fighter", ("fight_url", "fighter_url"), True)}}
+INTEGER_COLUMNS = {t: [c for c, ty in cols if ty == "bigint"] for t, cols in REAL_COLUMNS.items()}
+
+
+def _layout(eng, table):
+    q = sa.text("SELECT column_name, data_type FROM information_schema.columns WHERE table_name = :t AND table_schema = 'public' ORDER BY ordinal_position")
+    with eng.connect() as c:
+        cols = [tuple(r) for r in c.execute(q, {"t": table})]
+    insp = sa.inspect(eng)
+    idx = {(i["name"], tuple(i["column_names"]), bool(i["unique"])) for i in insp.get_indexes(table)}
+    return cols, idx, insp.get_pk_constraint(table)["constrained_columns"]
+
+
 @needs_postgres
-def test_the_written_out_base_tables_match_the_ones_a_real_build_produces(source, scratch):
+def test_the_written_out_base_tables_are_the_real_ones_and_match_what_the_demo_builds(source, scratch):
     rd.create_base_tables(scratch["eng"])
-    cols = lambda eng, t: [(c["name"], str(c["type"])) for c in sa.inspect(eng).get_columns(t)]
     for t in rd.BASE_TABLES:
-        assert cols(scratch["eng"], t) == cols(source["eng"], t), t                                              # same columns, same order, same types
-    idx = lambda eng: sorted((i["name"], tuple(i["column_names"])) for i in sa.inspect(eng).get_indexes("fighter_fights"))
-    assert idx(scratch["eng"]) == idx(source["eng"])                                                              # and the unique index the loader relies on
+        cols, idx, pk = _layout(scratch["eng"], t)
+        assert cols == REAL_COLUMNS[t], t                                                                            # names, order and types as in the real database
+        assert idx == REAL_INDEXES[t], t                                                                             # and its indexes
+        assert pk == (["fight_url"] if t == "fights" else []), t
+        assert _layout(source["eng"], t) == (cols, idx, pk), t                                                       # the demo builds the very same tables, so it exercises the real types
+
+
+@needs_postgres
+def test_an_old_style_backup_with_whole_numbers_written_as_decimals_restores_into_the_real_bigint_columns(source, scratch, tmp_path):
+    """Every backup made before the fix writes a whole number in a column that also has blanks as 12.0. The real count columns are bigint, which refuses that."""
+    import pandas as pd
+    shutil.copytree(source["prod"], tmp_path / "old")
+    changed = 0
+    for table, cols in INTEGER_COLUMNS.items():
+        f = tmp_path / "old" / f"{table}.csv"
+        df = pd.read_csv(f, dtype=str, keep_default_na=False)
+        for c in cols:
+            df[c] = df[c].map(lambda v: v + ".0" if v and "." not in v else v)
+            changed += int((df[c].str.endswith(".0")).sum())
+        df.to_csv(f, index=False, lineterminator="\n")
+    manifest = list(csv.DictReader(open(tmp_path / "old" / backup.MANIFEST, encoding="utf-8")))
+    for r in manifest:
+        r["sha256"] = backup._sha256(tmp_path / "old" / f"{r['table']}.csv")                                          # the manifest is rewritten to match: this is a valid old-style backup
+    with open(tmp_path / "old" / backup.MANIFEST, "w", encoding="utf-8", newline="") as fh:
+        w = csv.DictWriter(fh, fieldnames=list(manifest[0].keys()), lineterminator="\n")
+        w.writeheader()
+        w.writerows(manifest)
+    assert changed > 1000 and backup.verify(tmp_path / "old") == []                                                  # a valid backup, in the old style
+    assert (tmp_path / "old" / "fighter_fights.csv").read_text(encoding="utf-8").count(".0,") > 100                   # the file really does contain decimals where integers belong
+    result = rd.run_drill(tmp_path / "old", scratch["eng"], log=lambda *a: None)
+    assert result["ok"], [(e["table"], e["problems"]) for e in result["tables"] if e["problems"]]
+    assert {e["table"]: e["restored"] for e in result["tables"]} == source["counts"]
+    with scratch["eng"].connect() as c:
+        assert c.execute(sa.text("SELECT pg_typeof(sig_land)::text FROM fighter_fights LIMIT 1")).scalar() == "bigint"            # and they are bigint in the restored database
 
 
 @needs_postgres
