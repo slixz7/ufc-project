@@ -4,7 +4,7 @@
 
 A web app that predicts UFC fights **before they happen**, locks each pick with a timestamp, explains it in plain language, and grades itself against the real results. A daily job keeps it running: it loads newly announced cards, locks picks, and grades finished events.
 
-**Live app: https://ufc-predictor.streamlit.app/**
+**Live app: https://ufc-predictor.streamlit.app/** (free hosting: if it shows a sleep screen, press the button and wait about half a minute)
 
 **No accounts? [Run the demo in two minutes](demo/README.md):** the real pipeline, models and website, running on invented fighters (`python demo/run_demo.py`).
 
@@ -19,13 +19,13 @@ A web app that predicts UFC fights **before they happen**, locks each pick with 
 | | |
 |---|---|
 | **What it does** | Picks a winner for every UFC fight, past and upcoming, and shows the reasoning behind each pick |
-| **Best result** | **<!--n:acc_v3-->65.4%<!--/n-->** of <!--n:n_fights-->5,279<!--/n--> fights picked correctly (<!--n:first_year-->2016<!--/n--> to <!--n:last_year-->2026<!--/n-->), every pick made using only data from before that fight. A coin flip is 50% |
+| **Best result** | **<!--n:acc_v3-->65.4%<!--/n-->** of <!--n:n_fights-->5,279<!--/n--> fights picked correctly (<!--n:first_year-->2016<!--/n--> to <!--n:last_year-->2026<!--/n-->) when my model is blended with the betting market, every pick made using only data from before that fight. **The market is doing most of the work:** my statistics-only model gets <!--n:acc_v2-->61.8%<!--/n--> and the bookmakers' opening line alone gets <!--n:acc_line-->64.9%<!--/n-->. A coin flip is 50% |
 | **Also predicts** | The chance each fight goes the distance, with its own honest backtest and predictions locked before the event; a second version also uses the betting line (added on a narrow margin, tracked alongside) |
 | **Friends' game** | A private "beat the model" game: friends pick the winner, method and round before a card and are scored against the model |
 | **Demo** | One command runs the whole project on invented fighters, with no accounts or credentials: the real pipeline builds a private database and the real website opens on it |
 | **Stack** | Python (pandas, scikit-learn), PostgreSQL on Neon, SQL window functions, Streamlit, GitHub Actions |
 | **Automation** | A daily job reads announced cards (Wikipedia), betting lines (The Odds API) and results (Kaggle) |
-| **Safety** | <!--n:n_tests-->311<!--/n--> offline tests run before every scheduled job, a dry-run mode, and a read-only database user behind the public app |
+| **Safety** | <!--n:n_tests-->320<!--/n--> offline tests run before every scheduled job, a dry-run mode, and a read-only database user behind the public app |
 | **Transparency** | Every locked pick and goes-the-distance prediction is also published to a [public, time-stamped log](picks_log/ABOUT.md) in this repository |
 | **Cost** | Free tiers only |
 
@@ -216,7 +216,7 @@ An unattended job that writes to a database needs guardrails, so these are delib
 - **A card that suddenly shrinks is refused**, because that is more likely a parsing problem than real.
 - **Locked picks never change, and anyone can check.** A pick is made before its event and the lock is enforced in code. Each day's new picks and goes-the-distance predictions are also committed to a public log, so the repository history shows when each was made; `python pipeline/pick_log.py verify` reads that history and reports how many were committed before their event. The job also compares every logged row with the database each run and raises an alert if one differs. [What the log does and does not prove](picks_log/ABOUT.md).
 - **Dry-run first.** Every step can run in a mode that reports and writes nothing.
-- **Offline tests run before every scheduled job**, so a broken page reader stops the job before it writes anything. There are <!--n:n_tests-->311<!--/n-->, covering name matching, page parsing, the betting-line maths, that reasons add up to picks, the scoring maths, the pick log and the Discord digest.
+- **Offline tests run before every scheduled job**, so a broken page reader stops the job before it writes anything. There are <!--n:n_tests-->320<!--/n-->, covering name matching, page parsing, the betting-line maths, that reasons add up to picks, the scoring maths, the pick log and the Discord digest.
 - **Least privilege, verified rather than assumed.** The public app connects with a dedicated read-only database user made with plain SQL. An audit command checks that it holds no extra roles or powers, cannot write or create anything, and cannot read the private tables (the raw odds, the game's players and picks), and those checks run against a real Postgres server on every push. The owner connection string lives only in GitHub's encrypted secrets, and the public app holds only the read-only one.
 - **The friends' game writes through a locked-down database user** that can reach only its own tables, with the permissions tested on a real Postgres server on every push.
 - **Weekly backups.** The whole database, including the odds history that cannot be re-downloaded, is backed up every week to a private repository as plain CSV. A verifier checks every file against a manifest, and the restore tool never overwrites existing data. A restore drill rebuilds the whole database from a backup into a throwaway one on any computer and compares every table, and building it found a real bug in the backup itself (see the list of things I found below).
@@ -256,10 +256,14 @@ The quickest way is the **[demo](demo/README.md)**: `pip install -r demo/require
 
 ## Data and credits
 
-Fight data: the Kaggle dataset `scarekrow/ufc-data`, originally collected from ufcstats.com. It is independently collected and not endorsed by the UFC or ufcstats.com. Its ranking columns are snapshots at scrape time, so this project does not use them.
+Fight data: the Kaggle dataset [`scarekrow/ufc-data`](https://www.kaggle.com/datasets/scarekrow/ufc-data), originally collected from ufcstats.com. Its creator gave permission for this use (October 2026) on two conditions, which this project keeps: credit with a link back to the Kaggle page, and non-commercial use. The raw data is not included in this repository. It is independently collected and not endorsed by the UFC or ufcstats.com. Its ranking columns are snapshots at scrape time, so this project does not use them.
 
 Betting lines: the UFC Data set by N. Bair, version 0.1.1, licensed CC BY 4.0 (https://github.com/nlbair/ufc-data). It was built from ufcstats.com, MMA Decisions, BestFightOdds, the Kaggle dataset `martj42/ufc-rankings` and the UFCalendar rankings API; those sources should be credited as well. Cite: Bair, N. (2026). *UFC Data: scorecards, round statistics, and betting odds, 2013 to 2026* (Version 0.1.1) [Data set]. Zenodo. https://doi.org/10.5281/zenodo.23458636. Changes made here: only the fight id, fighter ids and names, and the opening and closing win probabilities were used.
 
 Announced cards: the schedule and fight cards are read from Wikipedia (https://en.wikipedia.org; text under CC BY-SA 4.0; only names, dates and weight classes are used). Live betting lines: The Odds API (https://the-odds-api.com), used only as a forecasting input.
 
 This project is independent and is not affiliated with or endorsed by the UFC.
+
+## License
+
+The code in this repository is released under the [MIT License](LICENSE). That license covers the code only. The data the project uses has its own terms, described under "Data and credits" above: in particular, the Kaggle fight data is for non-commercial use, with credit and a link back to its Kaggle page.
