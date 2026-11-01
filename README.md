@@ -25,7 +25,7 @@ A web app that predicts UFC fights **before they happen**, locks each pick with 
 | **Demo** | One command runs the whole project on invented fighters, with no accounts or credentials: the real pipeline builds a private database and the real website opens on it |
 | **Stack** | Python (pandas, scikit-learn), PostgreSQL on Neon, SQL window functions, Streamlit, GitHub Actions |
 | **Automation** | A daily job reads announced cards (Wikipedia), betting lines (The Odds API) and results (Kaggle) |
-| **Safety** | <!--n:n_tests-->320<!--/n--> offline tests run before every scheduled job, a dry-run mode, and a read-only database user behind the public app |
+| **Safety** | <!--n:n_tests-->371<!--/n--> offline tests run before every scheduled job, a dry-run mode, and a read-only database user behind the public app |
 | **Transparency** | Every locked pick and goes-the-distance prediction is also published to a [public, time-stamped log](picks_log/ABOUT.md) in this repository |
 | **Cost** | Free tiers only |
 
@@ -176,7 +176,7 @@ The most useful part of this project was catching results that looked good and w
 
 ## How a pick is made
 
-The model works on the **difference** between the two fighters across about 25 inputs (age, win rate and streak, striking and takedown rates, reach, Elo and the level of opponents faced). Each input adds or subtracts a little confidence, and the total becomes a probability.
+The model works on the **difference** between the two fighters across about 25 inputs (age, win rate and streak, striking and takedown rates, reach, Elo and the level of opponents faced). Each input adds or subtracts a little confidence, and the total becomes a probability. The inputs are computed in SQL from a fighter's earlier fights only, and the same SQL builds the features for fights that have not happened yet: see [SQL highlights](docs/SQL_HIGHLIGHTS.md).
 
 Example, from a real card (Krylov vs. Yakhyaev, UFC 333): the statistical model gave Yakhyaev 59% (+0.36 in log-odds) and the betting market gave him 81% (+1.45). The blend is 0.41 x 0.36 + 0.99 x 1.45 = +1.59, which is **83%**.
 
@@ -216,11 +216,14 @@ An unattended job that writes to a database needs guardrails, so these are delib
 - **A card that suddenly shrinks is refused**, because that is more likely a parsing problem than real.
 - **Locked picks never change, and anyone can check.** A pick is made before its event and the lock is enforced in code. Each day's new picks and goes-the-distance predictions are also committed to a public log, so the repository history shows when each was made; `python pipeline/pick_log.py verify` reads that history and reports how many were committed before their event. The job also compares every logged row with the database each run and raises an alert if one differs. [What the log does and does not prove](picks_log/ABOUT.md).
 - **Dry-run first.** Every step can run in a mode that reports and writes nothing.
-- **Offline tests run before every scheduled job**, so a broken page reader stops the job before it writes anything. There are <!--n:n_tests-->320<!--/n-->, covering name matching, page parsing, the betting-line maths, that reasons add up to picks, the scoring maths, the pick log and the Discord digest.
+- **Offline tests run before every scheduled job**, so a broken page reader stops the job before it writes anything. There are <!--n:n_tests-->371<!--/n-->, covering name matching, page parsing, the betting-line maths, that reasons add up to picks, the scoring maths, the pick log and the Discord digest.
 - **Least privilege, verified rather than assumed.** The public app connects with a dedicated read-only database user made with plain SQL. An audit command checks that it holds no extra roles or powers, cannot write or create anything, and cannot read the private tables (the raw odds, the game's players and picks), and those checks run against a real Postgres server on every push. The owner connection string lives only in GitHub's encrypted secrets, and the public app holds only the read-only one.
 - **The friends' game writes through a locked-down database user** that can reach only its own tables, with the permissions tested on a real Postgres server on every push.
 - **Weekly backups.** The whole database, including the odds history that cannot be re-downloaded, is backed up every week to a private repository as plain CSV. A verifier checks every file against a manifest, and the restore tool never overwrites existing data. A restore drill rebuilds the whole database from a backup into a throwaway one on any computer and compares every table, and building it found a real bug in the backup itself (see the list of things I found below).
 - **Tests and a static check run on every push** (the badge above), with no secrets, so a broken change is caught before it reaches the daily job.
+- **Locked dependencies.** The package versions the workflows use are pinned in `constraints-ci.txt`, which was proven by running the whole test suite on exactly those versions, so a new release of a library cannot quietly change the daily job. A test checks the lock, and in CI it also checks that what is installed equals it.
+- **Credential scans on every push.** A scanner reads the files and every commit on every branch for passwords, webhook addresses and keys, and reports where it found something but never what, so its output is safe to share.
+- **Failure alerts.** If the daily job or the weekly backup fails, a short message goes to a private Discord channel, never the one the friends read.
 - **Anything that needs a person ends the run with a non-zero exit code**, so GitHub emails me.
 
 ## First live test

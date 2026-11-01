@@ -35,21 +35,32 @@ jobs:
       TEST_PG_ADMIN_URL: postgresql+psycopg2://postgres:postgres@localhost:5432/postgres
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0                               # the whole history, so the credential scan below can read every commit
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
-          cache-dependency-path: pipeline/requirements.txt
+          cache-dependency-path: |
+            pipeline/requirements.txt
+            constraints-ci.txt
 
       - name: Install packages
         run: |
-          pip install -r pipeline/requirements.txt
-          pip install -r app/requirements.txt          # Streamlit, so the game page's tests run here too
-          pip install pyflakes
+          pip install -r pipeline/requirements.txt -c constraints-ci.txt          # the exact versions the whole suite was last proven against
+          pip install -r app/requirements.txt -c constraints-ci.txt               # Streamlit, so the game page's tests run here too
+          pip install pyflakes -c constraints-ci.txt
 
       - name: Static check (undefined names and unused imports, including in the web app that the tests cannot run)
         run: python -m pyflakes app pipeline tests
 
+      - name: Look for credentials in the files and in the whole git history (never prints what it finds, only where)
+        run: |
+          python tools/scan_secrets.py
+          python tools/scan_secrets.py --history
+
       - name: Offline tests
+        env:
+          UFC_EXPECT_LOCKED: "1"                  # also checks that the installed versions are exactly the locked ones
         run: python -m pytest -q tests

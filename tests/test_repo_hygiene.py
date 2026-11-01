@@ -5,11 +5,14 @@ and no raw data files.
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "tools"))
+import scan_secrets  # noqa: E402
 README = (ROOT / "README.md").read_text(encoding="utf-8")
 
 
@@ -72,44 +75,15 @@ def test_no_raw_data_file_is_committed():
     assert not [f for f in files if f.startswith("data/")]
 
 
-_PLACEHOLDER_USERS = {"USER", "user", "someone", "username", "postgres", "owner", "reader"}
-_PLACEHOLDER_HOSTS = {"HOST", "host", "localhost", "example.com", "db", "hostname"}
-
-
-def _looks_like_a_real_credential(text: str) -> list[str]:
-    """Real tokens (Neon passwords, Discord webhooks), and connection strings that point at a real host (a dotted name, not an address on this computer)."""
-    hits = re.findall(r"npg" + r"_[A-Za-z0-9]{8,}|webhooks/[0-9]{17,20}/[A-Za-z0-9_-]{50,}", text)      # written in pieces so this file does not trip the pre-push secret scan
-    for user, host in re.findall(r"postgres(?:ql)?(?:\+\w+)?://([^:\s/@]+):[^@\s]{4,}@([^\s/:?]+)", text):
-        if host in _PLACEHOLDER_HOSTS or host.endswith(".example") or re.match(r"^(127\.|0\.0\.0\.0|::1)", host):
-            continue
-        if "." in host:
-            hits.append(f"{user}:***@{host}")
-    return hits
-
-
-def test_the_credential_check_flags_real_looking_secrets_and_ignores_placeholders():
-    assert _looks_like_a_real_credential("postgresql://USER:PASSWORD@HOST/DB") == []
-    assert _looks_like_a_real_credential("postgres://someone:secret@127.0.0.1:1/x") == []
-    assert _looks_like_a_real_credential("postgresql+psycopg2://postgres:postgres@localhost:5432/postgres") == []
-    fake_host = "ep-cool-123.us-east-2.aws." + "neon" + ".tech"                                                  # a made-up address, assembled so the scan does not mistake it for a real one
-    assert _looks_like_a_real_credential(f"postgresql://owner:pw-longer@{fake_host}/neondb") == [f"owner:***@{fake_host}"]
-    fake_token = "npg" + "_AbCdEfGh1234"
-    assert _looks_like_a_real_credential(f"password is {fake_token}") == [fake_token]
-    assert _looks_like_a_real_credential("https://discord.com/api/webhooks/" + "1" * 18 + "/" + "a" * 60)[0].startswith("webhooks/")
-
-
 def test_secrets_are_not_present_in_any_text_file_of_the_project():
-    skip = {".git", "node_modules", "venv", ".venv", ".update_backup", "__pycache__", "data"}
-    hits = []
-    for f in ROOT.rglob("*"):
-        if not f.is_file() or any(part in skip for part in f.relative_to(ROOT).parts) or f.suffix in {".png", ".zip", ".ipynb", ".pyc"} or f.stat().st_size > 2_000_000:
-            continue
-        try:
-            text = f.read_text(encoding="utf-8")
-        except (UnicodeDecodeError, OSError):
-            continue
-        if f.name in {"test_repo_hygiene.py"}:                                                                    # this file's own examples
-            continue
-        if _looks_like_a_real_credential(text):
-            hits.append(str(f.relative_to(ROOT)))
-    assert hits == [], f"something that looks like a credential is in: {hits}"
+    """The same scanner the test workflow runs (tools/scan_secrets.py); its own tests cover what it recognises."""
+    assert scan_secrets.scan_files(ROOT) == []
+
+
+def test_the_social_preview_image_is_the_size_github_asks_for_and_under_its_limit():
+    f = ROOT / "docs" / "images" / "social-preview.png"
+    data = f.read_bytes()
+    assert data[:8] == b"\x89PNG\r\n\x1a\n"
+    width, height = int.from_bytes(data[16:20], "big"), int.from_bytes(data[20:24], "big")
+    assert (width, height) == (1280, 640)                                                                           # GitHub's recommended size for a repository's social preview
+    assert len(data) < 1_000_000                                                                                    # and its limit is 1 MB

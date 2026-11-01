@@ -1,0 +1,10 @@
+# Weekly check for newer versions of the GitHub Actions the workflows use (checkout, setup-python). A new version arrives as a pull request, and the
+# Tests workflow runs on it, so nothing changes until a green check says it is safe. The Python packages are locked in constraints-ci.txt and
+# refreshed by hand, after the whole suite has passed on the new versions.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 3
