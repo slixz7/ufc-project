@@ -22,11 +22,12 @@ A web app that predicts UFC fights **before they happen**, locks each pick with 
 | **Best result** | **<!--n:acc_v3-->65.4%<!--/n-->** of <!--n:n_fights-->5,279<!--/n--> fights picked correctly (<!--n:first_year-->2016<!--/n--> to <!--n:last_year-->2026<!--/n-->) when my model is blended with the betting market, every pick made using only data from before that fight. **The market is doing most of the work:** my statistics-only model gets <!--n:acc_v2-->61.8%<!--/n--> and the bookmakers' opening line alone gets <!--n:acc_line-->64.9%<!--/n-->. A coin flip is 50% |
 | **Live record so far** | <!--n:live_record-->Model-only picks: **17 of 26** right (65%; its own stated confidences predicted 16.0; 95% range 46% to 81%). Market-informed picks: **18 of 26** right (69%; its own stated confidences predicted 16.9; 95% range 50% to 83%). Across 2 cards, every pick locked before its event. Far too few to conclude anything: see [First live test](#first-live-test).<!--/n--> |
 | **Also predicts** | The chance each fight goes the distance, with its own honest backtest and predictions locked before the event; a second version also uses the betting line (added on a narrow margin, tracked alongside) |
+| **Insights page** | Plain findings from the fight data (which divisions go the distance, whether upsets happen as often as the betting market says, whether age, reach and experience matter), each with its sample size and a 95% range, computed live from the database, and silent where there are too few fights to say anything |
 | **Friends' game** | A private "beat the model" game: friends pick the winner, method and round before a card and are scored against the model |
 | **Demo** | One command runs the whole project on invented fighters, with no accounts or credentials: the real pipeline builds a private database and the real website opens on it |
 | **Stack** | Python (pandas, scikit-learn), PostgreSQL on Neon, SQL window functions, Streamlit, GitHub Actions |
 | **Automation** | A daily job reads announced cards (Wikipedia), betting lines (The Odds API) and results (Kaggle) |
-| **Safety** | <!--n:n_tests-->383<!--/n--> offline tests run before every scheduled job, a dry-run mode, and a read-only database user behind the public app |
+| **Safety** | <!--n:n_tests-->421<!--/n--> offline tests run before every scheduled job, a dry-run mode, and a read-only database user behind the public app |
 | **Transparency** | Every locked pick and goes-the-distance prediction is also published to a [public, time-stamped log](picks_log/ABOUT.md) in this repository |
 | **Cost** | Free tiers only |
 
@@ -221,7 +222,7 @@ An unattended job that writes to a database needs guardrails, so these are delib
 - **A card that suddenly shrinks is refused**, because that is more likely a parsing problem than real.
 - **Locked picks never change, and anyone can check.** A pick is made before its event and the lock is enforced in code. Each day's new picks and goes-the-distance predictions are also committed to a public log, so the repository history shows when each was made; `python pipeline/pick_log.py verify` reads that history and reports how many were committed before their event. The job also compares every logged row with the database each run and raises an alert if one differs. [What the log does and does not prove](picks_log/ABOUT.md).
 - **Dry-run first.** Every step can run in a mode that reports and writes nothing.
-- **Offline tests run before every scheduled job**, so a broken page reader stops the job before it writes anything. There are <!--n:n_tests-->383<!--/n-->, covering name matching, page parsing, the betting-line maths, that reasons add up to picks, the scoring maths, the pick log and the Discord digest.
+- **Offline tests run before every scheduled job**, so a broken page reader stops the job before it writes anything. There are <!--n:n_tests-->421<!--/n-->, covering name matching, page parsing, the betting-line maths, that reasons add up to picks, the scoring maths, the pick log and the Discord digest.
 - **Least privilege, verified rather than assumed.** The public app connects with a dedicated read-only database user made with plain SQL. An audit command checks that it holds no extra roles or powers, cannot write or create anything, and cannot read the private tables (the raw odds, the game's players and picks), and those checks run against a real Postgres server on every push. The owner connection string lives only in GitHub's encrypted secrets, and the public app holds only the read-only one.
 - **The friends' game writes through a locked-down database user** that can reach only its own tables, with the permissions tested on a real Postgres server on every push.
 - **Weekly backups.** The whole database, including the odds history that cannot be re-downloaded, is backed up every week to a private repository as plain CSV. A verifier checks every file against a manifest, and the restore tool never overwrites existing data. A restore drill rebuilds the whole database from a backup into a throwaway one on any computer and compares every table, and building it found a real bug in the backup itself (see the list of things I found below).
@@ -269,6 +270,8 @@ What the demo looks like (the fighters, results and players are invented, so the
 ![The demo's Upcoming page, with invented fighters and picks](docs/images/upcoming.png)
 
 ![The demo's Track record page, with invented results](docs/images/trackrecord.png)
+
+![The demo's Insights page, with invented data](docs/images/demo-insights.png)
 
 ## Data and credits
 

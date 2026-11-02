@@ -41,7 +41,7 @@ Real fight data comes with licensing and terms-of-use questions that a public re
 
 ## Using it
 
-- **Pages:** Upcoming, Past events, Fighters, Track record and Game, exactly as on the real site, under a red DEMO banner.
+- **Pages:** Upcoming, Past events, Fighters, Track record, Insights and Game, exactly as on the real site, under a red DEMO banner.
 - **The game:** sign in as `demo_ann`, `demo_bob`, `demo_cyd`, `demo_dee`, `demo_eli` or `demo_fay` with the PIN `123456`, or join as yourself with the invite code `demo`. Your picks are saved in the demo's own database.
 - **Dates move with you.** Everything is measured from the day the demo was built, so there is always an upcoming card a few days away. A demo more than three days old is rebuilt automatically.
 

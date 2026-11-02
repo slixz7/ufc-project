@@ -27,8 +27,10 @@ import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "pipeline"))      # the shared scoring maths (numpy and pandas only)
 import distance_scores  # noqa: E402
+import insights  # noqa: E402
 from distance_ui import line_html as dist_line_html, section_html as dist_section_html, section_v2_html as dist_section_v2_html  # noqa: E402
 import game_ui  # noqa: E402
+import insights_ui  # noqa: E402
 import title_rules  # noqa: E402
 
 st.set_page_config(page_title="UFC Fight Predictor", page_icon="🥊", layout="wide", initial_sidebar_state="collapsed")
@@ -1075,6 +1077,30 @@ def page_track():
 # ------------------------------------------------------------------------------------------------
 # layout
 # ------------------------------------------------------------------------------------------------
+@st.cache_data(ttl=3600, show_spinner=False)
+def insights_data() -> dict:
+    """Every finding on the Insights page, computed once an hour from three read-only queries (the heavy part is a little pandas over about 9,000 fights)."""
+    fights = q("SELECT fight_url, event_date, weight_class, num_rounds, result, finish_round FROM fights")        # ALL fights: a fighter's earlier fights are counted from them
+    try:
+        picks = q("SELECT fight_url, fighter_a, fighter_b, market_prob_a, actual_winner FROM fight_picks_v3")
+    except sa.exc.SQLAlchemyError:                                                                                   # a deployment without the market-informed picks still gets the rest
+        picks = pd.DataFrame(columns=["fight_url", "fighter_a", "fighter_b", "market_prob_a", "actual_winner"])
+    rows = q("SELECT fight_url, fighter_url, side, won, reach_cm, dob FROM fighter_fights")
+    return insights.compute_all(fights, picks, rows)
+
+
+def page_insights():
+    d = insights_data()
+    module_html('<div class="hero"><div class="kicker mono">Patterns in past fights</div><h1>What the data says</h1>'
+                '<div class="aside" style="margin-top:0">Plain findings from the same fights the models learn from, each with how many fights it rests on and a 95% range. '
+                'They are patterns, not causes, and every figure is computed from the database as you read it.</div></div>'
+                + figs([(f"{d['n_fights']:,}", f"Fights counted since {insights.ERA_START.year}"), (f"{d['n_with_market']:,}", "With a market line"), (str(len(d["divisions"])), "Divisions shown")]))
+    for block in insights_ui.sections(d):
+        module_html(block)
+    module_html('<div class="note">Counted the way the goes-the-distance model counts: fights since 2002 with 3 or 5 scheduled rounds, disqualifications left out, and a fight "went the distance" '
+                'when its result is a decision.</div>')
+
+
 def main():
     st.markdown(CSS, unsafe_allow_html=True)
     if get_engine() is None:
@@ -1091,11 +1117,11 @@ def main():
     if os.getenv("DEMO_MODE"):                       # set by demo/run_demo.py: never on the real site
         module_html('<div class="demo-banner"><b>DEMO</b>Every fighter, fight and result on this site is invented. The data pipeline, the models and these pages are the real ones, '
                     'running on made-up data, so the numbers show how the system works and say nothing about real fights.</div>')
-    page = st.radio("Navigate", ["Upcoming", "Past events", "Fighters", "Track record", "Game"],
+    page = st.radio("Navigate", ["Upcoming", "Past events", "Fighters", "Track record", "Insights", "Game"],
                     horizontal=True, label_visibility="collapsed")
     try:
         {"Upcoming": page_upcoming, "Past events": page_past, "Fighters": page_fighters,
-         "Track record": page_track, "Game": page_game}[page]()
+         "Track record": page_track, "Insights": page_insights, "Game": page_game}[page]()
     except (sa.exc.SQLAlchemyError, RuntimeError):
         st.error("Couldn't load data right now. If the database was idle it may need a few seconds to wake up; "
                  "refresh the page and try again.")

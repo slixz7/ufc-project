@@ -342,7 +342,7 @@ def test_every_page_of_the_real_website_opens_on_the_demo_and_says_it_is_a_demo(
     with _app(tiny_demo) as at:
         assert not at.exception and not at.error and "DEMO" in _plain(at) and "invented" in _plain(at), _plain(at)[:300]
         pages = list(at.radio[0].options)
-        assert pages == ["Upcoming", "Past events", "Fighters", "Track record", "Game"]
+        assert pages == ["Upcoming", "Past events", "Fighters", "Track record", "Insights", "Game"]
         next_card = pd.read_sql(sa.text("SELECT event_name FROM upcoming_fights WHERE event_date = :d AND bout_order = 1"), sa.create_engine(tiny_demo["owner_url"].replace("postgresql://", "postgresql+psycopg2://", 1)),
                                 params={"d": date.fromisoformat(tiny_demo["next_card"])}).iloc[0, 0]
         assert next_card in _plain(at), (next_card, _plain(at)[:300])                                                  # the Upcoming page shows the invented next card
@@ -353,6 +353,23 @@ def test_every_page_of_the_real_website_opens_on_the_demo_and_says_it_is_a_demo(
         at = at.radio[0].set_value("Track record").run()
         assert "graded" in _plain(at).lower(), _plain(at)[:600]
         assert "waiting for results" in _plain(at).lower() and "locked pre-fight predictions" in _plain(at).lower(), _plain(at)[:600]
+
+
+@needs_postgres
+@needs_streamlit
+def test_the_insights_page_opens_as_the_sites_read_only_login_and_every_finding_is_built_from_the_numbers(small_demo):
+    with _app(small_demo) as at:
+        at = at.radio[0].set_value("Insights").run()
+        text = _plain(at)
+        assert not at.exception and not at.error and "DEMO" in text, text[:300]
+        assert "What the data says" in text and "Fights counted since 2002" in text
+        for heading in ("How fights end", "Which divisions go the distance", "Are fights going the distance more or less often?", "Favourites, upsets and finishing",
+                        "Does UFC experience matter?", "Age and reach: how much do they matter?"):
+            assert heading in text, heading
+        assert re.search(r"Of [\d,]+ fights since 2002, \d+% went to a decision, \d+% ended in a knockout or TKO and \d+% in a submission\.", text), text[:900]
+        assert "went the distance most often" in text and "Fighters making their UFC debut" in text                      # the sentences are filled in from this database
+        assert "The site never shows odds" in text and "a pattern is not a cause" in text.lower()
+        assert not re.search(r"\b(decimal|american) odds\b|\+\d{3}\b", text, flags=re.I)                              # no betting odds anywhere on the page
 
 
 @needs_postgres

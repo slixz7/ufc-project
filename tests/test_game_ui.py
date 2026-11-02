@@ -367,6 +367,6 @@ def test_the_page_survives_tables_that_do_not_exist_yet(world):
 
 def test_the_site_has_a_game_page_wired_to_its_own_database_user_and_secrets():
     src = (ROOT / "app" / "streamlit_app.py").read_text(encoding="utf-8")
-    assert '"Game": page_game' in src and '"Upcoming", "Past events", "Fighters", "Track record", "Game"' in src
+    assert '"Game": page_game' in src and '"Upcoming", "Past events", "Fighters", "Track record", "Insights", "Game"' in src
     assert 'game_ui.render(q, get_game_engine(), _secret("GAME_INVITE_CODE"))' in src and 'url = _secret("GAME_DATABASE_URL")' in src
     assert "pool_size=3, max_overflow=3" in src                                                  # at most 6 connections, under the game user's limit of 10
