@@ -25,7 +25,7 @@ A web app that predicts UFC fights **before they happen**, locks each pick with 
 | **Demo** | One command runs the whole project on invented fighters, with no accounts or credentials: the real pipeline builds a private database and the real website opens on it |
 | **Stack** | Python (pandas, scikit-learn), PostgreSQL on Neon, SQL window functions, Streamlit, GitHub Actions |
 | **Automation** | A daily job reads announced cards (Wikipedia), betting lines (The Odds API) and results (Kaggle) |
-| **Safety** | <!--n:n_tests-->371<!--/n--> offline tests run before every scheduled job, a dry-run mode, and a read-only database user behind the public app |
+| **Safety** | <!--n:n_tests-->372<!--/n--> offline tests run before every scheduled job, a dry-run mode, and a read-only database user behind the public app |
 | **Transparency** | Every locked pick and goes-the-distance prediction is also published to a [public, time-stamped log](picks_log/ABOUT.md) in this repository |
 | **Cost** | Free tiers only |
 
@@ -120,19 +120,19 @@ The blend beats the opening line by a small but statistically clear amount (firs
 
 ## A second question: will the fight go the distance?
 
-Besides picking a winner, the app estimates the chance that each fight **goes to a decision**. It uses only how long these two fighters' earlier fights lasted (the share of the scheduled time they used, how often they went to a decision, how often they won or lost by a finish) and whether it is a title fight or five rounds. It was built the same honest way as the winner model: every prediction uses only earlier fights, upcoming ones are locked before the event and published to the public log, and the test is a walk-forward over <!--n:dist_n-->8,180<!--/n--> fights (<!--n:dist_first_year-->2006<!--/n--> to <!--n:dist_last_year-->2026<!--/n-->), each predicted by a model trained on earlier fights only. AUC is the chance that a fight that went the distance was given a higher probability than one that did not (0.5 is chance).
+Besides picking a winner, the app estimates the chance that each fight **goes to a decision**. It uses only how long these two fighters' earlier fights lasted (the share of the scheduled time they used, how often they went to a decision, how often they won or lost by a finish) and whether it is a title fight or five rounds. It was built the same honest way as the winner model: every prediction uses only earlier fights, upcoming ones are locked before the event and published to the public log, and the test is a walk-forward over <!--n:dist_n-->8,192<!--/n--> fights (<!--n:dist_first_year-->2006<!--/n--> to <!--n:dist_last_year-->2026<!--/n-->), each predicted by a model trained on earlier fights only. AUC is the chance that a fight that went the distance was given a higher probability than one that did not (0.5 is chance).
 
 <!--auto:distance_table-->
 
 | Predictor | Log loss | Brier score | AUC |
 |---|---|---|---|
 | Coin flip | 0.6931 | 0.2500 | 0.500 |
-| Plain decision rate of the previous three years | 0.6918 | 0.2493 | 0.512 |
+| Plain decision rate of the previous three years | 0.6918 | 0.2493 | 0.511 |
 | **Goes-the-distance model** | **0.6689** | **0.2381** | **0.625** |
 
 <!--/auto:distance_table-->
 
-The model beats the plain decision rate of the previous three years by **<!--n:dist_gain-->0.0229<!--/n--> log loss per fight** (95% interval <!--n:dist_gain_lo-->0.0179<!--/n--> to <!--n:dist_gain_hi-->0.0278<!--/n-->), was better in <!--n:dist_years_better-->19<!--/n--> of <!--n:dist_years_total-->21<!--/n--> years, and its probabilities were within <!--n:dist_gap-->3.4<!--/n--> points of what happened in every large bucket. I tested richer versions (weight class, age, ratings, striking and grappling styles, gradient boosting) and none helped: the signal is how long these fighters' fights tend to last. Before trusting the result I checked it for leaks the way I did for the winner model: the counts were recomputed by brute force for 300 random fights, and a placebo with the answers shuffled drops to chance (AUC 0.500).
+The model beats the plain decision rate of the previous three years by **<!--n:dist_gain-->0.0228<!--/n--> log loss per fight** (95% interval <!--n:dist_gain_lo-->0.0179<!--/n--> to <!--n:dist_gain_hi-->0.0278<!--/n-->), was better in <!--n:dist_years_better-->19<!--/n--> of <!--n:dist_years_total-->21<!--/n--> years, and its probabilities were within <!--n:dist_gap-->3.4<!--/n--> points of what happened in every large bucket. I tested richer versions (weight class, age, ratings, striking and grappling styles, gradient boosting) and none helped: the signal is how long these fighters' fights tend to last. Before trusting the result I checked it for leaks the way I did for the winner model: the counts were recomputed by brute force for 300 random fights, and a placebo with the answers shuffled drops to chance (AUC 0.500).
 
 ### Adding the betting market, on a narrow margin
 
@@ -143,6 +143,10 @@ On the <!--n:dist2_n-->5,763<!--/n--> past fights with a line (<!--n:dist2_first
 ## A game for friends: beat the model
 
 The site has a private game. Friends join with an invite code and pick, for each fight on the **next card**, the **winner, how it ends and the round**. Picks close 6 hours before the card's first fight (the following card then opens), and other players' picks stay hidden until then. The page is built in the site's own style, and clearing a pick on screen clears it in the database, so what you see is what is saved. Two leaderboards follow once the results are in:
+
+![The game's leaderboards, from the demo with invented players](docs/images/leaderboard.png)
+
+*The game's leaderboards, from the demo (the players are invented).*
 
 - **Beat the model:** your result minus the model's, on the winner call and on goes-the-distance (a Decision pick means "goes the distance"). +1 if you are right and the model is wrong, -1 if the reverse, 0 otherwise. Copying the model scores exactly 0, so the only way up is to disagree with it and be right.
 - **Points:** winner +1, method +1, round +1.
@@ -216,7 +220,7 @@ An unattended job that writes to a database needs guardrails, so these are delib
 - **A card that suddenly shrinks is refused**, because that is more likely a parsing problem than real.
 - **Locked picks never change, and anyone can check.** A pick is made before its event and the lock is enforced in code. Each day's new picks and goes-the-distance predictions are also committed to a public log, so the repository history shows when each was made; `python pipeline/pick_log.py verify` reads that history and reports how many were committed before their event. The job also compares every logged row with the database each run and raises an alert if one differs. [What the log does and does not prove](picks_log/ABOUT.md).
 - **Dry-run first.** Every step can run in a mode that reports and writes nothing.
-- **Offline tests run before every scheduled job**, so a broken page reader stops the job before it writes anything. There are <!--n:n_tests-->371<!--/n-->, covering name matching, page parsing, the betting-line maths, that reasons add up to picks, the scoring maths, the pick log and the Discord digest.
+- **Offline tests run before every scheduled job**, so a broken page reader stops the job before it writes anything. There are <!--n:n_tests-->372<!--/n-->, covering name matching, page parsing, the betting-line maths, that reasons add up to picks, the scoring maths, the pick log and the Discord digest.
 - **Least privilege, verified rather than assumed.** The public app connects with a dedicated read-only database user made with plain SQL. An audit command checks that it holds no extra roles or powers, cannot write or create anything, and cannot read the private tables (the raw odds, the game's players and picks), and those checks run against a real Postgres server on every push. The owner connection string lives only in GitHub's encrypted secrets, and the public app holds only the read-only one.
 - **The friends' game writes through a locked-down database user** that can reach only its own tables, with the permissions tested on a real Postgres server on every push.
 - **Weekly backups.** The whole database, including the odds history that cannot be re-downloaded, is backed up every week to a private repository as plain CSV. A verifier checks every file against a manifest, and the restore tool never overwrites existing data. A restore drill rebuilds the whole database from a backup into a throwaway one on any computer and compares every table, and building it found a real bug in the backup itself (see the list of things I found below).
@@ -256,6 +260,12 @@ The first version of the scoreboard was a Power BI dashboard on the same databas
 ## Run it yourself
 
 The quickest way is the **[demo](demo/README.md)**: `pip install -r demo/requirements.txt`, then `python demo/run_demo.py`. It needs no accounts and runs the whole project on invented data. To run it on real data, see the **[runbook](docs/RUNBOOK.md)** for the commands, the schedule setup, and the project layout.
+
+What the demo looks like (the fighters, results and players are invented, so the numbers say nothing about real fights):
+
+![The demo's Upcoming page, with invented fighters and picks](docs/images/upcoming.png)
+
+![The demo's Track record page, with invented results](docs/images/trackrecord.png)
 
 ## Data and credits
 

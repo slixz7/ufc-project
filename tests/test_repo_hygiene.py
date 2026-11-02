@@ -87,3 +87,12 @@ def test_the_social_preview_image_is_the_size_github_asks_for_and_under_its_limi
     width, height = int.from_bytes(data[16:20], "big"), int.from_bytes(data[20:24], "big")
     assert (width, height) == (1280, 640)                                                                           # GitHub's recommended size for a repository's social preview
     assert len(data) < 1_000_000                                                                                    # and its limit is 1 MB
+
+
+def test_every_screenshot_of_the_demo_says_in_its_caption_that_the_data_is_invented():
+    demo_shots = re.findall(r"!\[([^\]]*)\]\(docs/images/((?:demo-[a-z-]+|upcoming|trackrecord|leaderboard)\.png)\)", README)
+    assert len(demo_shots) >= 3, demo_shots                                                                           # the three demo screenshots are in the README
+    for alt, name in demo_shots:
+        assert "demo" in alt.lower() and re.search(r"invented|demo", alt.lower()), f"{name}: its description must say it comes from the demo"
+    assert README.count("*The game's leaderboards, from the demo (the players are invented).*") == 1
+    assert "the fighters, results and players are invented" in README
