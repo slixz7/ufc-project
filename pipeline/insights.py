@@ -88,10 +88,8 @@ def yearly_rates(f: pd.DataFrame, min_fights: int = 100) -> list[dict]:
     return [{"year": int(y), **rate(g.went_distance.sum(), len(g))} for y, g in f.groupby("year") if len(g) >= min_fights]
 
 
-def trend_summary(rows: list[dict], span: int = 3) -> dict | None:
+def _compare(rows: list[dict], span: int) -> dict:
     """The first `span` years against the last `span` years, pooled. 'rose' or 'fell' only if the difference is bigger than chance alone would give."""
-    if len(rows) < 2 * span:
-        return None
     early, late = rows[:span], rows[-span:]
     k1, n1, k2, n2 = sum(r["k"] for r in early), sum(r["n"] for r in early), sum(r["k"] for r in late), sum(r["n"] for r in late)
     p1, p2 = k1 / n1, k2 / n2
@@ -99,6 +97,19 @@ def trend_summary(rows: list[dict], span: int = 3) -> dict | None:
     diff = p2 - p1
     verdict = "rose" if diff > 1.96 * se else "fell" if diff < -1.96 * se else "no clear change"
     return {"early_years": (early[0]["year"], early[-1]["year"]), "late_years": (late[0]["year"], late[-1]["year"]), "early": p1, "late": p2, "early_n": n1, "late_n": n2, "verdict": verdict}
+
+
+def trend_summary(rows: list[dict], span: int = 3, recent_years: int = 10) -> dict | None:
+    """The whole span (first `span` years against last `span`), and, when there are more than `recent_years` years, the same for the last `recent_years` alone with the
+    lowest and highest year in it: a change that happened long ago says nothing about now."""
+    if len(rows) < 2 * span:
+        return None
+    out = _compare(rows, span)
+    if len(rows) > recent_years and recent_years >= 2 * span:
+        recent = rows[-recent_years:]
+        lo, hi = min(recent, key=lambda r: r["rate"]), max(recent, key=lambda r: r["rate"])
+        out["recent"] = {**_compare(recent, span), "n_years": len(recent), "lowest": lo["rate"], "highest": hi["rate"]}
+    return out
 
 
 # ---------------------------------------------------------------------------------------------- favourites and upsets
@@ -149,12 +160,23 @@ def _bucketed(gap: pd.Series, edges: list, labels: list[str], won: pd.Series) ->
 
 def experience_rows(pairs: pd.DataFrame) -> dict:
     """Does the fighter with more UFC fights behind them win? By how many more, since 2005 (earlier fighters' histories are cut short by the start of the data).
-    Also: fighters making their UFC debut against someone with 3 or more UFC fights."""
+    For each group it also measures how often that more experienced fighter was ALSO the older one, because the two travel together and would otherwise be
+    mistaken for one effect. Also: fighters making their UFC debut against someone with 3 or more UFC fights."""
     p = pairs[pairs.event_date >= EXPERIENCE_START]
     gap = p.prior_a - p.prior_b
-    more_won = np.where(gap > 0, p.a_won, 1 - p.a_won)
     keep = gap != 0
-    rows = _bucketed(gap[keep].abs(), [1, 3, 6, 11, np.inf], ["1 to 2 more", "3 to 5 more", "6 to 10 more", "11 or more"], pd.Series(more_won, index=p.index)[keep])
+    more_is_a = gap[keep] > 0
+    more_won = pd.Series(np.where(gap > 0, p.a_won, 1 - p.a_won), index=p.index)[keep]
+    known = (p.age_a.notna() & p.age_b.notna())[keep]
+    a_older = (p.age_a > p.age_b)[keep]
+    also_older = pd.Series(np.where(more_is_a, a_older, ~a_older), index=a_older.index)
+    labels = ["1 to 2 more", "3 to 5 more", "6 to 10 more", "11 or more"]
+    bucket = pd.cut(gap[keep].abs(), bins=[1, 3, 6, 11, np.inf], right=False, labels=labels)
+    rows = []
+    for lab in labels:
+        sel = bucket == lab
+        if sel.sum():
+            rows.append({"label": lab, **rate(more_won[sel].sum(), sel.sum()), "also_older": rate(also_older[sel & known].sum(), (sel & known).sum())})
     debut = p[((p.prior_a == 0) & (p.prior_b >= 3)) | ((p.prior_b == 0) & (p.prior_a >= 3))]
     debut_won = np.where(debut.prior_a == 0, debut.a_won, 1 - debut.a_won)
     return {"gap": rows, "debut": rate(debut_won.sum(), len(debut))}
@@ -201,14 +223,25 @@ def sentence_divisions(rows: list[dict]) -> str | None:
             f"({pct(bottom['rate'])} of {bottom['n']:,}): a spread of {round(100 * (top['rate'] - bottom['rate']))} points between divisions.")
 
 
+def _span_text(t: dict) -> str:
+    (e0, e1), (l0, l1) = t["early_years"], t["late_years"]
+    return f"{pct(t['early'])} of fights went the distance in {e0} to {e1} ({t['early_n']:,} fights) and {pct(t['late'])} in {l0} to {l1} ({t['late_n']:,})"
+
+
 def sentence_trend(t: dict | None) -> str | None:
     if not t:
         return None
-    (e0, e1), (l0, l1) = t["early_years"], t["late_years"]
-    base = f"{pct(t['early'])} of fights went the distance in {e0} to {e1} ({t['early_n']:,} fights) and {pct(t['late'])} in {l0} to {l1} ({t['late_n']:,})"
-    if t["verdict"] == "no clear change":
-        return f"{base}: a difference small enough that chance alone could produce it."
-    return f"{base}: the share {t['verdict']}, by more than chance alone would give."
+    base = _span_text(t)
+    out = (f"{base}: a difference small enough that chance alone could produce it." if t["verdict"] == "no clear change"
+           else f"{base}: the share {t['verdict']}, by more than chance alone would give.")
+    rec = t.get("recent")
+    if rec:
+        (a0, a1), (b0, b1) = rec["early_years"], rec["late_years"]
+        tail = f" Over the last {rec['n_years']} years the yearly share stayed between {pct(rec['lowest'])} and {pct(rec['highest'])}, "
+        tail += (f"with no clear change between {a0} to {a1} and {b0} to {b1}." if rec["verdict"] == "no clear change"
+                 else f"and it {rec['verdict']} from {pct(rec['early'])} in {a0} to {a1} to {pct(rec['late'])} in {b0} to {b1}.")
+        out += tail
+    return out
 
 
 def sentence_favourites(rows: list[dict]) -> str | None:
@@ -232,7 +265,8 @@ def sentence_upsets(rows: list[dict]) -> str | None:
     base = f"Even in the {top['label'].lower()} group, the underdog won {pct(upset)} of the time, about one fight in {round(1 / upset)}."
     if top["fav_won"]["lo"] <= top["implied"] <= top["fav_won"]["hi"]:
         return f"{base} The market's price (the favourite at {pct(top['implied'])}) is consistent with what happened."
-    return f"{base} The market implied {pct(top['implied'])} for the favourite; the real figure was {pct(top['fav_won']['rate'])}."
+    return (f"{base} The market implied {pct(top['implied'])} for the favourite; the real figure was {pct(top['fav_won']['rate'])}. "
+            f"The note below explains why a gap like this does not mean the betting line was wrong.")
 
 
 def sentence_experience(e: dict) -> str | None:
@@ -243,6 +277,9 @@ def sentence_experience(e: dict) -> str | None:
     big = next((r for r in reversed(e["gap"]) if r["n"] >= MIN_FIGHTS_SENTENCE), None)
     if big:
         parts.append(f"The fighter with an edge of {big['label']} UFC fights won {pct(big['rate'])} of {big['n']:,} ({vs_even(big)}).")
+        older = big.get("also_older")
+        if older and older["n"] >= MIN_FIGHTS_SENTENCE:
+            parts.append(f"In {pct(older['rate'])} of those fights the more experienced fighter was also the older one" + (", so this overlaps with the age pattern below." if older["rate"] >= 0.6 else "."))
     return " ".join(parts) or None
 
 

@@ -100,6 +100,31 @@ def test_years_with_too_few_fights_are_left_out_and_the_trend_is_only_called_whe
     assert small["verdict"] == "no clear change"                                                                       # 3 points on 300 fights each is within chance
 
 
+REAL_YEARS = {2006: (.33, 158), 2007: (.36, 168), 2008: (.32, 201), 2009: (.43, 212), 2010: (.49, 249), 2011: (.49, 295), 2012: (.47, 331), 2013: (.47, 375), 2014: (.50, 493),
+              2015: (.47, 462), 2016: (.50, 483), 2017: (.49, 445), 2018: (.49, 468), 2019: (.54, 505), 2020: (.50, 442), 2021: (.51, 495), 2022: (.47, 505), 2023: (.48, 503),
+              2024: (.55, 511), 2025: (.49, 515), 2026: (.42, 473)}                                                          # the live page's yearly table, as first published
+
+
+def test_a_rise_that_happened_long_ago_is_not_reported_as_a_current_trend_the_real_yearly_table():
+    rows = [{"year": y, **ins.rate(round(p * n), n)} for y, (p, n) in REAL_YEARS.items()]
+    t = ins.trend_summary(rows)
+    assert t["verdict"] == "rose" and t["recent"]["verdict"] == "no clear change" and (t["recent"]["early_years"], t["recent"]["late_years"]) == ((2017, 2019), (2024, 2026))
+    assert (round(t["recent"]["lowest"], 2), round(t["recent"]["highest"], 2)) == (0.42, 0.55) and t["recent"]["n_years"] == 10
+    s = ins.sentence_trend(t)
+    assert "the share rose, by more than chance alone would give." in s and "Over the last 10 years the yearly share stayed between 42% and 55%, with no clear change between 2017 to 2019 and 2024 to 2026." in s
+
+
+def test_the_recent_view_appears_only_when_there_are_more_years_than_it_covers_and_can_say_rose_or_fell():
+    flat = ins.yearly_rates(_year_frame([.5] * 10), min_fights=100)
+    assert "recent" not in ins.trend_summary(flat)                                                                        # ten years in all: the recent decade is the whole span
+    assert "recent" not in ins.trend_summary(ins.yearly_rates(_year_frame([.4, .4, .4, .6, .6, .6]), min_fights=100))
+    rising = ins.trend_summary(ins.yearly_rates(_year_frame([.40] * 8 + [.40, .40, .40, .60, .60, .60]), min_fights=100))     # 14 years, 2010 to 2023: the last ten are 2014 to 2023
+    assert rising["recent"]["verdict"] == "rose" and rising["recent"]["n_years"] == 10
+    assert "and it rose from 40% in 2014 to 2016 to 60% in 2021 to 2023." in ins.sentence_trend(rising)
+    falling = ins.trend_summary(ins.yearly_rates(_year_frame([.60] * 11 + [.40, .40, .40]), min_fights=100))              # 60% every year to 2020, then 40% for 2021 to 2023
+    assert falling["recent"]["verdict"] == "fell" and "and it fell from 60% in 2014 to 2016 to 40% in 2021 to 2023." in ins.sentence_trend(falling)
+
+
 # ---------------------------------------------------------------------------------------------- favourites and upsets
 def _picks_and_fights():
     picks, fights = [], []
@@ -184,6 +209,18 @@ def test_debutants_against_experienced_fighters_are_counted_from_either_side():
     assert (d["n"], d["k"]) == (4, 2) and d["rate"] == 0.5
 
 
+def test_experience_also_measures_how_often_the_more_experienced_fighter_was_the_older_one():
+    #       a_won prior_a prior_b age_a age_b reach_a reach_b      the gap is 15 for all four; the more experienced fighter is A, then B, then A, then A
+    rows = [(1, 20, 5, 35, 28, 0, 0),      # A more experienced and older
+            (0, 5, 20, 26, 33, 0, 0),      # B more experienced and older
+            (1, 20, 5, 29, 31, 0, 0),      # A more experienced but YOUNGER
+            (0, 20, 5, 36, 30, 0, 0)]      # A more experienced and older
+    big = ins.experience_rows(_pairs(rows))["gap"][-1]
+    assert big["label"] == "11 or more" and big["n"] == 4 and (big["also_older"]["k"], big["also_older"]["n"]) == (3, 4)
+    unknown = ins.experience_rows(_pairs(rows + [(1, 20, 5, np.nan, 30, 0, 0)]))["gap"][-1]
+    assert unknown["n"] == 5 and unknown["also_older"]["n"] == 4                                                           # an unknown age is left out of the overlap, not counted as "no"
+
+
 def test_age_and_reach_edges_use_the_older_and_the_longer_fighter_with_exact_boundaries_and_no_ties():
     #       a_won prior_a prior_b age_a age_b reach_a reach_b
     rows = [(1, 0, 0, 32, 30, 0, 0),        # a is older by exactly 2 -> "2 to 5": older wins
@@ -227,7 +264,8 @@ def test_the_favourites_and_upsets_sentences_use_the_extreme_groups_and_check_th
     up = ins.sentence_upsets(rows)
     assert up.startswith("Even in the 80% or more group, the underdog won 15% of the time, about one fight in 7.") and "is consistent with what happened" in up
     off = [{**rows[1], "fav_won": r(300, 210)}]                                                                         # the favourite really won 70%, not 85%
-    assert "The market implied 85% for the favourite; the real figure was 70%." in ins.sentence_upsets([rows[0], off[0]])
+    mismatch = ins.sentence_upsets([rows[0], off[0]])
+    assert "The market implied 85% for the favourite; the real figure was 70%." in mismatch and "does not mean the betting line was wrong" in mismatch
     assert ins.sentence_favourites([{**rows[0], "n": 10}, rows[1]]) is None                                               # a group of 10 is shown, never quoted
     assert ins.sentence_upsets([{**rows[1], "n": 10}]) is None
 
@@ -236,6 +274,11 @@ def test_the_experience_and_edge_sentences_say_about_even_when_the_range_include
     e = {"gap": [{"label": "11 or more", **r(100, 52)}], "debut": r(200, 90)}                                           # 45% of 200: the range is 38% to 52%, which includes a coin flip
     assert ins.sentence_experience(e) == ("Fighters making their UFC debut against someone with 3 or more UFC fights won 45% of 200 (about even: the range includes 50%). "
                                           "The fighter with an edge of 11 or more UFC fights won 52% of 100 (about even: the range includes 50%).")
+    withage = ins.sentence_experience({"gap": [{"label": "11 or more", **r(100, 40), "also_older": r(100, 78)}], "debut": r(5, 1)})
+    assert withage == ("The fighter with an edge of 11 or more UFC fights won 40% of 100 (less often than not). "
+                       "In 78% of those fights the more experienced fighter was also the older one, so this overlaps with the age pattern below.")
+    assert "overlaps" not in ins.sentence_experience({"gap": [{"label": "11 or more", **r(100, 40), "also_older": r(100, 50)}], "debut": r(5, 1)})      # no overlap claimed at 50%
+    assert "also the older" not in ins.sentence_experience({"gap": [{"label": "11 or more", **r(100, 40), "also_older": r(10, 9)}], "debut": r(5, 1)})   # too few known ages to quote
     clear = ins.sentence_experience({"gap": [{"label": "11 or more", **r(1000, 400)}], "debut": r(1000, 400)})
     assert clear.count("less often than not") == 2                                                                      # 40% of 1,000 is clearly below a coin flip
     assert ins.sentence_experience({"gap": [{"label": "11 or more", **r(10, 9)}], "debut": r(5, 1)}) is None

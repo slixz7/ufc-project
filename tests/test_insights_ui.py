@@ -108,3 +108,13 @@ def test_the_readme_runbook_and_demo_describe_the_insights_page_without_quoting_
     assert "![The demo's Insights page, with invented data](docs/images/demo-insights.png)" in readme
     assert "## The Insights page" in runbook and "pipeline/insights.py" in runbook and "Not enough fights yet to say anything here" in runbook
     assert "Track record, Insights and Game" in (ROOT / "demo" / "README.md").read_text(encoding="utf-8")
+
+
+def test_the_note_about_how_the_margin_is_removed_is_true_of_the_code_that_removes_it():
+    import model_v3
+    imp = lambda american: 100 / (american + 100) if american > 0 else -american / (-american + 100)                      # an American price as an implied chance
+    for a, b in ((-300, 250), (-150, 130), (110, -130), (-1000, 600)):
+        assert model_v3.devig(a, b) == pytest.approx(imp(a) / (imp(a) + imp(b)))                                          # divided out evenly across both sides: the note says exactly that
+    favourites = ui.sections(findings())[3]
+    assert "divided out evenly across both fighters" in favourites and "does not by itself mean the line was wrong" in favourites
+    assert "beside the age pattern below" in ui.sections(findings())[4]

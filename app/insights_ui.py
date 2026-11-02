@@ -82,12 +82,13 @@ def sections(d: dict) -> list[str]:
         section("Are fights going the distance more or less often?", s["trend"], bars_html([{**r, "label": str(r["year"])} for r in d["years"]], "label", "Year") if have(d["years"]) else "",
                 "Years with at least 100 fights, each with its own range. A swing of a few points from one year to the next is the kind of thing chance produces."),
         section("Favourites, upsets and finishing", " ".join(x for x in (s["favourites"], s["upsets"]) if x) or None, favourites_html(d["favourites"]) if have(d["favourites"]) else "",
-                "The market's price is the betting line with the bookmaker's margin removed. The site never shows odds: these are groups of fights, not individual lines, "
-                "and only fights that have a line are included. The dashed line marks 50%."),
+                "The market's price is the betting line with the bookmaker's margin divided out evenly across both fighters, a simple method that tends to make heavy favourites look "
+                "a little weaker than they are, so a favourite winning a few points more often than priced here does not by itself mean the line was wrong. The site never shows odds: "
+                "these are groups of fights, not individual lines, and only fights that have a line are included. The dashed line marks 50%."),
         section("Does UFC experience matter?", s["experience"], bars_html([{**r, "label": f"{r['label']} UFC fights"} for r in d["experience"]["gap"]], "label",
                                                                         "The fighter with") if have(d["experience"]["gap"]) else "",
                 "\"UFC fights\" counts a fighter's fights in this data before the one being looked at (from 2005 on), so it misses fights in other promotions. The bars show how often "
-                "the more experienced fighter won."),
+                "the more experienced fighter won. More UFC fights usually means a longer career, so read this beside the age pattern below."),
         section("Age and reach: how much do they matter?", s["edges"], (edges_html(d["edges"]["age"], "The older fighter, by how much") + edges_html(d["edges"]["reach"], "The longer reach, by how much"))
                 if have(d["edges"]["age"]) or have(d["edges"]["reach"]) else "",
                 "A pattern is not a cause: older fighters and longer reaches also go with other things, such as weight class and who is booked against whom. The dashed line marks 50%."),
