@@ -7,8 +7,12 @@ It is a small second stage on top of v1: the v1 prediction, the favourite's stre
 
 Why it exists, and how sure we are. pipeline/experiment_distance_market.py tested this against a rule fixed in advance. It passed, but
 narrowly: a log-loss gain of about 0.003, with a 95% interval whose low end was barely above zero. So v2 is added ALONGSIDE v1, never instead
-of it: both are locked before each event and both are scored on the same fights, so the live record can settle whether the line really
-helps. It is a market-informed prediction in the same sense as the winner model v3, and it is not betting advice; no odds are shown.
+of it: both are locked before each event and both are scored on the same fights. The live record will NOT settle whether the line really helps
+anytime soon: a gain this small would take thousands of live fights (the README gives the figure). So both keep running, under a rule fixed in advance:
+
+THE RETIREMENT RULE. Retire v2 only if, over at least 300 graded live fights, it is clearly worse than v1 (the 95% range of the log-loss difference sits
+entirely on v1's side). Until then, keep both. `scoring` prints where this stands.
+It is a market-informed prediction in the same sense as the winner model v3, and it is not betting advice; no odds are shown.
 
     python pipeline/model_distance_v2.py setup                          # create the two tables
     python pipeline/model_distance_v2.py backtest [--rebuild]           # a v2 prediction for every past fight that has a line (earlier fights only)
@@ -39,6 +43,7 @@ import model_v2 as v2
 log = logging.getLogger("model_distance_v2")
 MIN_TRAIN = 800                     # fights with lines before the second stage trains (the experiment's own threshold)
 C_REG = 1.0
+RETIRE_AFTER_FIGHTS = 300         # the pre-declared retirement rule needs at least this many graded live fights before it can say anything
 EPS = 1e-6
 TABLE_PAST, TABLE_UP = "fight_distance_v2", "upcoming_distance_v2"
 
@@ -205,6 +210,20 @@ def run_grade(engine) -> int:
     return v1.run_grade(engine, TABLE_UP)
 
 
+def retirement_status(live: pd.DataFrame) -> dict:
+    """Where the pre-declared retirement rule stands. `live` holds the graded live predictions (columns p_v2, p_v1, went_distance). The rule: retire v2 only if, over at
+    least RETIRE_AFTER_FIGHTS graded fights, it is clearly worse than v1 (the 95% range of the log-loss difference lies entirely on v1's side)."""
+    n = len(live)
+    if n < RETIRE_AFTER_FIGHTS:
+        return {"n": n, "retire": False, "verdict": None,
+                "text": f"keep both running ({n} graded fights so far; the rule needs at least {RETIRE_AFTER_FIGHTS} before it can say anything)"}
+    verdict = distance_scores.paired_vs(live, "p_v2", "p_v1")["verdict"]
+    if verdict == "clearly worse":
+        return {"n": n, "retire": True, "verdict": verdict, "text": f"RETIRE the market-informed prediction: over {n} graded fights it is clearly worse than the model-only one"}
+    relation = {"clearly better": "is clearly better than", "cannot be told apart": "cannot be told apart from"}[verdict]
+    return {"n": n, "retire": False, "verdict": verdict, "text": f"keep both running (over {n} graded fights the market-informed prediction {relation} the model-only one)"}
+
+
 # ----------------------------------------------------------------------------------------------
 # the report
 # ----------------------------------------------------------------------------------------------
@@ -231,6 +250,7 @@ def cmd_scoring(engine) -> int:
                                    FROM {TABLE_UP} m JOIN upcoming_distance_v1 v ON v.bout_id = m.bout_id
                                    WHERE m.status = 'locked' AND m.graded_at IS NOT NULL AND m.went_distance IS NOT NULL"""), engine)
     print(f"\nThe locked record (predictions made before their events, now graded): {len(live)}")
+    print(f"  Retirement rule (fixed in advance): {retirement_status(live)['text']}")
     if len(live):
         y = live.went_distance.astype(float).to_numpy()
         ll = lambda p: float(-np.mean(y * np.log(np.clip(p, 1e-4, 1 - 1e-4)) + (1 - y) * np.log(1 - np.clip(p, 1e-4, 1 - 1e-4))))

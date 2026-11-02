@@ -73,7 +73,7 @@ def section_v2_html(s2: dict, v1_scores: dict, cmp: dict, years: tuple[int, int]
         rows.append(f'<tr><td>{html.escape(name)}</td>' + "".join(f'<td class="mono">{c}</td>' for c in cells) + "</tr>")
     out = ['<div class="sect"><h3>The same question, with the betting market</h3></div>',
            '<div class="aside" style="margin-top:0">A second prediction adds one thing to the one above: how strong the favourite is on the betting line, because a heavy favourite usually finishes the fight. '
-           'It was added on a narrow margin, so it runs alongside the first and both are locked before each event; the locked record decides whether it earns its place. '
+           'It was added on a narrow margin, so it runs alongside the first and both are locked before each event. With a gain this small, the locked record will take years to tell the two apart, so both keep running; the rule, fixed in advance, is that the market-informed one is retired only if it is clearly worse over at least 300 graded live fights. '
            f'No odds are shown on this site. Tested year by year on the {s2["n"]:,} fights that have a line ({s2["first_year"]} to {s2["last_year"]}), each predicted from earlier fights only.</div>',
            _t(rows, ["Predictor", "Log loss", "Brier score", "AUC"]),
            f'<div class="note" style="margin-top:14px">Compared with the model-only prediction on the same fights: {cmp["mean"]:+.4f} log loss per fight on average (negative means the market-informed one is better), '

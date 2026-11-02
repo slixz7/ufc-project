@@ -51,6 +51,19 @@ def num(n) -> str:
     return f"{int(n):,}"
 
 
+def wilson(k: int, n: int, z: float = 1.96) -> tuple[float, float]:
+    """The 95% range for a proportion k/n (the Wilson interval, which behaves for small samples)."""
+    p = k / n
+    d = 1 + z * z / n
+    centre = p + z * z / (2 * n)
+    r = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n))
+    return (centre - r) / d, (centre + r) / d
+
+
+def whole_pct(x: float) -> str:
+    return f"{round(100 * x)}%"
+
+
 @dataclass
 class Numbers:
     values: dict = field(default_factory=dict)      # inline numbers: name -> text
@@ -218,6 +231,11 @@ def compute(frames: dict, n_tests: int | None = None) -> Numbers:
         gain = -cmp_m["mean"]                                    # positive: the market-informed prediction has the lower log loss
         v.update(dist2_gain=f"{gain:.4f}", dist2_gain_lo=f"{-cmp_m['hi']:+.4f}", dist2_gain_hi=f"{-cmp_m['lo']:+.4f}")
         # the README says: better on average, better in most years, but the 95% range includes zero (so the two cannot yet be told apart). Each part is checked.
+        if gain > 0:                                         # how many live fights it would take to see a gain this small, by the same 80%-power convention as the winner model's figure
+            sd_m = (cmp_m["hi"] - cmp_m["lo"]) / (2 * 1.96) * math.sqrt(len(dm))
+            needed = ((1.96 + 0.84) * sd_m / gain) ** 2
+            per_year = len(dm) / max(1, int(rm["last_year"]) - int(rm["first_year"]) + 1)
+            v.update(dist2_live_needed=num(round(needed, -2)), dist2_years_needed=f"{needed / per_year:.0f}")
         if gain <= 0:
             out.broken_claims.append("The README says the market-informed goes-the-distance prediction is better than the model-only one on average, but it no longer is.")
         if cmp_m["verdict"] != "cannot be told apart":
@@ -258,6 +276,24 @@ def compute(frames: dict, n_tests: int | None = None) -> Numbers:
                     v.update(u333_v3=num(g3.correct.sum()), u333_expected_v3=f"{g3.confidence.sum():.1f}")
     if "u333_n" not in v:
         out.skipped.append("the UFC 333 picks (upcoming_picks_v2) are missing or not graded yet")
+
+    # the running live record: every locked pick that has been graded, across all cards, as ONE LINE for a table cell (an inline value, not a block: blocks are laid out on their own lines)
+    def graded(frame):
+        return frame[(frame.status == "locked") & frame.graded_at.notna() & frame.correct.notna()] if frame is not None and len(frame) else None
+    g2, g3 = graded(l2), graded(l3)
+    if g2 is not None and len(g2):
+        def part(label, g):
+            k, n = int(g.correct.sum()), len(g)
+            lo, hi = wilson(k, n)
+            return f"{label}: **{k} of {n}** right ({whole_pct(k / n)}; its own stated confidences predicted {g.confidence.sum():.1f}; 95% range {whole_pct(lo)} to {whole_pct(hi)})"
+        parts = [part("Model-only picks", g2)] + ([part("Market-informed picks", g3)] if g3 is not None and len(g3) else [])
+        cards = g2.event_date.nunique()
+        v["live_record"] = (". ".join(parts) + f". Across {cards} card{'s' if cards != 1 else ''}, every pick locked before its event. "
+                            "Far too few to conclude anything: see [First live test](#first-live-test).")
+        if len(g2) >= 300:
+            out.broken_claims.append(f"The README says the live record is far too small to conclude anything, but it now holds {len(g2)} graded picks: rewrite that line.")
+    else:
+        out.skipped.append("the running live record (upcoming_picks_v2) has no graded picks yet")
 
     if n_tests is not None:
         v["n_tests"] = str(n_tests)
@@ -300,7 +336,7 @@ def apply(text: str, nums: Numbers) -> tuple[str, list[str], list[str]]:
 
 def known_names() -> set:
     """Every marker name the generator can fill (used by a test to catch typos in README.md)."""
-    return {"n_fights", "first_year", "last_year", "acc_v2", "acc_line", "acc_v3", "dis_share", "dis_blend", "dis_model", "n_live_needed", "year_min_fights",
+    return {"n_fights", "first_year", "last_year", "acc_v2", "acc_line", "acc_v3", "dis_share", "dis_blend", "dis_model", "n_live_needed", "live_record", "dist2_live_needed", "dist2_years_needed", "year_min_fights",
             "year_lo", "year_hi", "market_weight", "model_weight", "u333_n", "u333_v2", "u333_v3", "u333_expected_v2", "u333_expected_v3", "n_tests",
             "results_accuracy", "results_tiers", "calibration", "scoring_table", "scoring_compare", "distance_table", "dist_n", "dist_first_year", "dist_last_year",
             "dist_gain", "dist_gain_lo", "dist_gain_hi", "dist_years_better", "dist_years_total", "dist_gap", "dist2_n", "dist2_first_year", "dist2_last_year",

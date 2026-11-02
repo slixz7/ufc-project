@@ -456,7 +456,7 @@ def test_the_report_compares_the_two_predictions_on_the_same_fights(db, capsys):
     assert dv2.main(["scoring"]) == 0
     out = capsys.readouterr().out
     for needle in ("Market-informed (v2)", "Model-only (v1), same fights", "Last-3-years decision rate", "Coin flip", "Paired log-loss difference, market-informed minus model-only",
-                   "Better than model-only in", "Calibration of the market-informed prediction", "The locked record"):
+                   "Better than model-only in", "Calibration of the market-informed prediction", "The locked record", "Retirement rule (fixed in advance): keep both running"):
         assert needle in out, needle
 
 
