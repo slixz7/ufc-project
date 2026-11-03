@@ -14,3 +14,24 @@ raw/
 demo/.data/
 # copies of files the update tool replaced
 .update_backup/
+report.txt
+.streamlit/secrets.toml
+secrets.toml
+kaggle.json
+credentials
+*.pem
+id_rsa
+venv/
+.venv/
+.DS_Store
+Thumbs.db
+.streamlit/secrets.toml
+secrets.toml
+kaggle.json
+credentials
+*.pem
+id_rsa
+venv/
+.venv/
+.DS_Store
+Thumbs.db

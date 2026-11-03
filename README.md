@@ -28,7 +28,7 @@ A web app that predicts UFC fights **before they happen**, locks each pick with 
 | **Demo** | One command runs the whole project on invented fighters, with no accounts or credentials: the real pipeline builds a private database and the real website opens on it |
 | **Stack** | Python (pandas, scikit-learn), PostgreSQL on Neon, SQL window functions, Streamlit, GitHub Actions |
 | **Automation** | A daily job reads announced cards (Wikipedia), betting lines (The Odds API) and results (Kaggle) |
-| **Safety** | <!--n:n_tests-->460<!--/n--> offline tests run before every scheduled job, a dry-run mode, and a read-only database user behind the public app |
+| **Safety** | <!--n:n_tests-->468<!--/n--> offline tests run before every scheduled job, a dry-run mode, and a read-only database user behind the public app |
 | **Transparency** | Every locked pick and goes-the-distance prediction is also published to a [public, time-stamped log](picks_log/ABOUT.md) in this repository |
 | **Cost** | Free tiers only |
 
@@ -210,8 +210,9 @@ The daily job (`pipeline/auto_update.py`) runs these steps, and one failing neve
 4. **Market-informed picks:** locks them two days before each event, using that day's line.
 5. **Public pick log:** appends every newly locked pick to `picks_log/locked_picks.csv`; the workflow then commits it.
 6. **Results:** downloads results, grades the locked picks, and scores the new fights.
-7. **Weekly:** refreshes the historical odds dataset and extends the backtest.
-8. **Digest:** posts newly locked picks and finished events' results to a Discord channel, each exactly once.
+7. **Weekly:** refreshes the historical odds dataset and extends the backtest, and on Mondays refreshes this README's generated numbers.
+8. **Model health:** checks each model's graded live record against its own probabilities and against the retirement rules fixed in advance (see the [model cards](docs/MODEL_CARDS.md)), and flags only what needs a person.
+9. **Digest:** posts newly locked picks and finished events' results to a Discord channel, each exactly once.
 
 ![The daily job's report on GitHub Actions](docs/images/daily-job.png)
 
@@ -223,7 +224,7 @@ An unattended job that writes to a database needs guardrails, so these are delib
 - **A card that suddenly shrinks is refused**, because that is more likely a parsing problem than real.
 - **Locked picks never change, and anyone can check.** A pick is made before its event and the lock is enforced in code. Each day's new picks and goes-the-distance predictions are also committed to a public log, so the repository history shows when each was made; `python pipeline/pick_log.py verify` reads that history and reports how many were committed before their event. The job also compares every logged row with the database each run and raises an alert if one differs. [What the log does and does not prove](picks_log/ABOUT.md).
 - **Dry-run first.** Every step can run in a mode that reports and writes nothing.
-- **Offline tests run before every scheduled job**, so a broken page reader stops the job before it writes anything. There are <!--n:n_tests-->460<!--/n-->, covering name matching, page parsing, the betting-line maths, that reasons add up to picks, the scoring maths, the pick log and the Discord digest.
+- **Offline tests run before every scheduled job**, so a broken page reader stops the job before it writes anything. There are <!--n:n_tests-->468<!--/n-->, covering name matching, page parsing, the betting-line maths, that reasons add up to picks, the scoring maths, the pick log and the Discord digest.
 - **Least privilege, verified rather than assumed.** The public app connects with a dedicated read-only database user made with plain SQL. An audit command checks that it holds no extra roles or powers, cannot write or create anything, and cannot read the private tables (the raw odds, the game's players and picks), and those checks run against a real Postgres server on every push. The owner connection string lives only in GitHub's encrypted secrets, and the public app holds only the read-only one.
 - **The friends' game writes through a locked-down database user** that can reach only its own tables, with the permissions tested on a real Postgres server on every push.
 - **Weekly backups.** The whole database, including the odds history that cannot be re-downloaded, is backed up every week to a private repository as plain CSV. A verifier checks every file against a manifest, and the restore tool never overwrites existing data. A restore drill rebuilds the whole database from a backup into a throwaway one on any computer and compares every table, and building it found a real bug in the backup itself (see the list of things I found below).
@@ -253,7 +254,7 @@ Every card graded since is counted in the running total in the "At a glance" tab
 - Test whether my own captured lines can extend the market-informed model past the downloaded dataset.
 - Test line movement, the change between a fight's first and last line, as a signal by itself.
 - Add fighters' pre-UFC records, the best remaining fix for debutants.
-- A head-to-head page where any two fighters can be compared.
+- Predict a hypothetical matchup between any two fighters (the Fighters page already compares their career stats side by side).
 
 ## Earlier stage: a Power BI dashboard
 
@@ -261,6 +262,23 @@ The first version of the scoreboard was a Power BI dashboard on the same databas
 
 ![Scoreboard](docs/images/scoreboard.png)
 ![Fight explorer](docs/images/fight-explorer.png)
+
+## Where things are
+
+| Folder | What is in it |
+|---|---|
+| `pipeline/` | The data pipeline and the models: loading, the winner models (v2 and v3) and the goes-the-distance models, the daily job (`auto_update.py` and the `auto_*.py` steps), backups and their restore drill, the model-health check, and the generators for this README's numbers |
+| `app/` | The Streamlit website: Upcoming, Past events, Fighters, Track record, Insights and Game |
+| `sql/` | The feature and model SQL (window functions that use only a fighter's earlier fights) and the read-only database role |
+| `tests/` | The automated tests, run on every push and before every daily job |
+| `demo/` | The one-command demo that runs the whole project on invented data |
+| `docs/` | The runbook, the [model cards](docs/MODEL_CARDS.md), the [SQL highlights](docs/SQL_HIGHLIGHTS.md), and the screenshots used here |
+| `picks_log/` | The public, append-only log of every locked prediction |
+| `upcoming/` | Card files and the name-alias lists the daily job uses |
+| `tools/` | The one-zip update tool and the credential scanner |
+| `.github/workflows/` | The three workflows: the tests, the daily job and the weekly backup |
+| `.streamlit/` | The site's look and settings; its secrets live in Streamlit's own secrets store, never in the repository |
+| notebooks `01` to `04` | Early exploration: loading and cleaning, features, a first model, and Postgres and SQL. Kept for history: the pipeline no longer uses them (it reads a Kaggle dataset) and the tests do not cover them |
 
 ## Run it yourself
 

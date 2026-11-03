@@ -294,18 +294,5 @@ When the daily report lists a held name, add one line to `upcoming/aliases.csv` 
 
 ## Project structure
 
-```
-01_load_and_clean.ipynb ... 04_postgres_sql.ipynb   the original analysis
-sql/features.sql             feature views (window functions)
-sql/predictions.sql          prediction table and dashboard views
-sql/model_v2.sql, model_v3.sql   tables and views for the two model versions
-sql/readonly_role.sql        explains the read-only login (created by pipeline/db_roles.py)
-pipeline/                    predict.py, game_core.py, game_db.py, game_admin.py, bout_results.py, update_from_csv.py, upcoming.py, model_v2.py, model_v3.py, auto_update.py (entry point), auto_common/names/cards/odds/picks/results.py, pick_log.py, digest.py, requirements.txt
-app/                         streamlit_app.py and its requirements
-.streamlit/config.toml       the web app's theme
-tests/                       offline tests
-.github/workflows/           auto-update.yml (the schedule)
-upcoming/                    an example card and aliases.csv (card name -> dataset name)
-picks_log/                   the public pick log (written by the GitHub job) and an explainer
-docs/                        this runbook, the Power BI guide, and screenshots
-```
+The folder map is in the README, under **Where things are**, and a test fails if a folder is added without being listed there. What each module in `pipeline/` does is in the table at the top of this runbook, one row per feature.
+
