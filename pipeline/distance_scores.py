@@ -75,10 +75,16 @@ def pair_summary(d: pd.DataFrame, new: str, ref: str) -> dict:
     return {"n": len(d), "rate": float(y.mean()), "new": float(_loss(y, d[new].to_numpy()).mean()), "ref": float(_loss(y, d[ref].to_numpy()).mean())}
 
 
+def paired_diff(y, p_new, p_ref) -> dict:
+    """The per-fight log-loss difference between two predictions of the same yes/no outcome (new minus ref; negative means `new` is better), with a 95% range.
+    Works for any such outcome, not only going the distance: the model health check uses it for who won."""
+    y = np.asarray(y, dtype=float)
+    return _paired(_loss(y, np.asarray(p_new, dtype=float)) - _loss(y, np.asarray(p_ref, dtype=float)))
+
+
 def paired_vs(d: pd.DataFrame, new: str, ref: str) -> dict:
     """The per-fight log-loss difference between two predictions on the SAME fights (new minus ref; negative means `new` is better), with a 95% range."""
-    y = d.went_distance.astype(float).to_numpy()
-    return _paired(_loss(y, d[new].to_numpy()) - _loss(y, d[ref].to_numpy()))
+    return paired_diff(d.went_distance.astype(float).to_numpy(), d[new].to_numpy(), d[ref].to_numpy())
 
 
 def years_better_vs(d: pd.DataFrame, new: str, ref: str, min_year_fights: int = 50) -> tuple[int, int]:

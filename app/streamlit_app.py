@@ -1083,7 +1083,7 @@ def insights_data() -> dict:
     fights = q("SELECT fight_url, event_date, weight_class, num_rounds, result, finish_round FROM fights")        # ALL fights: a fighter's earlier fights are counted from them
     try:
         picks = q("SELECT fight_url, fighter_a, fighter_b, market_prob_a, actual_winner FROM fight_picks_v3")
-    except sa.exc.SQLAlchemyError:                                                                                   # a deployment without the market-informed picks still gets the rest
+    except (sa.exc.SQLAlchemyError, pd.errors.DatabaseError):                                                        # a deployment without the market-informed picks still gets the rest (pandas wraps the database's error in its own type)
         picks = pd.DataFrame(columns=["fight_url", "fighter_a", "fighter_b", "market_prob_a", "actual_winner"])
     rows = q("SELECT fight_url, fighter_url, side, won, reach_cm, dob FROM fighter_fights")
     return insights.compute_all(fights, picks, rows)

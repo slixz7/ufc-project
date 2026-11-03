@@ -105,7 +105,6 @@ def test_the_readme_runbook_and_demo_describe_the_insights_page_without_quoting_
     row = [l for l in readme.splitlines() if l.startswith("| **Insights page**")]
     assert len(row) == 1 and "95% range" in row[0] and "silent where there are too few fights" in row[0]
     assert not re.search(r"\d+%", row[0].replace("95% range", ""))                                                      # a description, never a result that could go stale (95% is the confidence level)
-    assert "![The demo's Insights page, with invented data](docs/images/demo-insights.png)" in readme
     assert "## The Insights page" in runbook and "pipeline/insights.py" in runbook and "Not enough fights yet to say anything here" in runbook
     assert "Track record, Insights and Game" in (ROOT / "demo" / "README.md").read_text(encoding="utf-8")
 

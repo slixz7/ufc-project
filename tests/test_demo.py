@@ -374,6 +374,24 @@ def test_the_insights_page_opens_as_the_sites_read_only_login_and_every_finding_
 
 @needs_postgres
 @needs_streamlit
+def test_the_insights_page_still_opens_when_a_deployment_has_no_market_informed_picks_table(small_demo):
+    owner = sa.create_engine(small_demo["owner_url"].replace("postgresql://", "postgresql+psycopg2://", 1))
+    with owner.begin() as c:
+        c.exec_driver_sql("ALTER TABLE fight_picks_v3 RENAME TO fight_picks_v3_hidden")
+    try:
+        with _app(small_demo) as at:
+            at = at.radio[0].set_value("Insights").run()
+            text = _plain(at)
+            assert not at.exception and not at.error and "What the data says" in text, text[:300]              # pandas raises its own error type for a missing table; the page must catch it
+            assert "Not enough fights yet to say anything here." in text and "Which divisions go the distance" in text    # the favourites section says so; the rest is unaffected
+            assert re.search(r"Of [\d,]+ fights since 2002", text)
+    finally:
+        with owner.begin() as c:
+            c.exec_driver_sql("ALTER TABLE fight_picks_v3_hidden RENAME TO fight_picks_v3")
+
+
+@needs_postgres
+@needs_streamlit
 def test_a_visitor_can_sign_in_as_a_demo_player_and_see_the_leaderboard(tiny_demo):
     with _app(tiny_demo) as at:
         at = at.radio[0].set_value("Game").run()
