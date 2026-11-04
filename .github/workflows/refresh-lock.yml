@@ -1,0 +1,169 @@
+name: Refresh lock
+
+# Once a month (and on demand) this rebuilds constraints-ci.txt, the lock that pins every package the workflows install, so the lock stays fresh without anyone asking:
+#
+#   1. refresh   installs the NEWEST versions the requirements files allow into a brand-new Python 3.12 environment, runs the static check, both credential scans and the
+#                whole test suite against them, and only if all of it passes hands the proposed lock to the next job. If nothing changed, it stops here and says so.
+#   2. open-pr   writes the pull request. It installs nothing and runs only the code in this repository's main branch (tools/refresh_lock.py), which re-checks the proposed
+#                file, writes the header and the description itself, and refuses anything that does not look like this project's lock.
+#   3. alert     if either job failed, posts a short message to the private alert channel (the same ALERT_WEBHOOK_URL as the other workflows).
+#
+# Why two jobs: job 1 runs brand-new packages that nobody has reviewed yet, so it has read-only access and no secrets and cannot push, comment or open anything. Job 2 has
+# write access but never runs a downloaded package. A bad release can therefore break the refresh (and you hear about it) but cannot reach anything.
+#
+# Nothing changes until you merge the pull request. If the suite fails against the new versions the old lock stays in force and the daily job is unaffected.
+#
+# One-time setting for job 2: Settings > Actions > General > Workflow permissions > tick "Allow GitHub Actions to create and approve pull requests".
+# GitHub does not run the Tests workflow on a pull request that a workflow opened; the same checks ran in job 1, and Tests runs again on main when you merge.
+on:
+  schedule:
+    - cron: "23 6 1 * *"          # the 1st of every month at 06:23 UTC
+  workflow_dispatch:
+
+permissions: {}                   # nothing by default: each job asks for exactly what it needs
+
+concurrency:
+  group: refresh-lock
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    name: Rebuild the lock and run everything against it
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    outputs:
+      changed: ${{ steps.plan.outputs.changed }}
+      tests: ${{ steps.result.outputs.tests }}
+    services:
+      postgres:                                   # a throwaway server, only for the permission tests (as in tests.yml)
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TEST_PG_ADMIN_URL: postgresql+psycopg2://postgres:postgres@localhost:5432/postgres
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0                          # the whole history, so the credential scan can read every commit
+          persist-credentials: false              # no token is left on disk: nothing in this job may push
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"                  # the same as every other workflow, so the lock is valid for all of them
+
+      - name: Install the newest allowed versions into a brand-new environment (deliberately without the lock)
+        run: |
+          python -m venv .refresh-venv
+          echo "$GITHUB_WORKSPACE/.refresh-venv/bin" >> "$GITHUB_PATH"
+          .refresh-venv/bin/pip install -r pipeline/requirements.txt -r app/requirements.txt pyflakes
+          .refresh-venv/bin/pip freeze > freeze.txt
+
+      - name: Compare with the current lock (writes the new lock only if something changed)
+        id: plan
+        run: python tools/refresh_lock.py plan --freeze freeze.txt --current constraints-ci.txt --out constraints-ci.txt --date "$(date -u +%F)"
+
+      - name: Static check against the new versions
+        if: steps.plan.outputs.changed == 'true'
+        run: python -m pyflakes app pipeline tests tools
+
+      - name: Look for credentials in the files and in the whole git history (never prints what it finds, only where)
+        if: steps.plan.outputs.changed == 'true'
+        run: |
+          python tools/scan_secrets.py
+          python tools/scan_secrets.py --history
+
+      - name: Offline tests against the new versions
+        if: steps.plan.outputs.changed == 'true'
+        env:
+          UFC_EXPECT_LOCKED: "1"                  # also checks that the installed versions are exactly the proposed lock
+        run: |
+          set -o pipefail
+          python -m pytest -q tests 2>&1 | tee pytest.log
+
+      - name: Read the test result (fails unless everything passed)
+        id: result
+        if: steps.plan.outputs.changed == 'true'
+        run: python tools/refresh_lock.py summarize-log pytest.log --github-output
+
+      - name: Hand the proposed lock to the next job
+        if: steps.plan.outputs.changed == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: new-lock
+          path: constraints-ci.txt
+          retention-days: 7
+          if-no-files-found: error
+
+  open-pr:
+    name: Open the pull request
+    needs: refresh
+    if: needs.refresh.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4                 # this repository's own main branch: the only code this job runs
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: new-lock
+          path: ${{ runner.temp }}/proposed
+
+      - name: Re-check the proposed lock and write the final file and the pull request text
+        env:
+          TESTS: ${{ needs.refresh.outputs.tests }}
+        run: |
+          python3 tools/refresh_lock.py publish \
+            --new "$RUNNER_TEMP/proposed/constraints-ci.txt" --current constraints-ci.txt \
+            --tests "$TESTS" --date "$(date -u +%F)" \
+            --out-lock constraints-ci.txt --out-summary "$RUNNER_TEMP/pr-body.md"
+
+      - name: Commit to a branch and open (or update) the pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          changes="$(git status --porcelain)"
+          if [ "$changes" != " M constraints-ci.txt" ]; then
+            echo "Expected exactly one changed file, constraints-ci.txt. Found: $changes"
+            exit 1
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B lock-refresh
+          git add constraints-ci.txt
+          git commit -m "Refresh the dependency lock (monthly)"
+          git push --force origin lock-refresh
+          number="$(gh pr list --head lock-refresh --state open --json number --jq '.[0].number // empty')"
+          if [ -n "$number" ]; then
+            gh pr edit "$number" --body-file "$RUNNER_TEMP/pr-body.md"
+          else
+            gh pr create --base main --head lock-refresh --title "Refresh the dependency lock (monthly)" --body-file "$RUNNER_TEMP/pr-body.md"
+          fi
+
+  alert:
+    name: Tell the alert channel if the refresh failed
+    needs: [refresh, open-pr]
+    if: failure()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tell the alert channel that the run failed
+        env:
+          ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}          # its own private channel, never the one the friends read; if it is not set, nothing is sent
+        run: python3 pipeline/notify_failure.py "Refresh lock"

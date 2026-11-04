@@ -4,8 +4,9 @@
 # and the whole test suite passed against them (318 passed, 2 skipped). The requirements files keep only the minimum each package needs; this file says
 # which versions are actually used, so a new release of any package cannot change the daily job, the backup or the tests until this lock is refreshed.
 #
-# To refresh it, ask for a new lock: it is rebuilt on Python 3.12 (the same as the workflows), the whole suite is run against the new versions, and it
-# arrives as an update zip. Do not edit it by hand, and do not regenerate it on another Python version or operating system.
+# It is refreshed on the 1st of every month by .github/workflows/refresh-lock.yml: a brand-new Python 3.12 environment installs the newest versions the requirements
+# allow, the whole suite runs against them, and only if everything passes is a pull request opened for you to review and merge. Do not edit it by hand, and do not
+# regenerate it on another Python version or operating system.
 altair==6.3.0
 anyio==4.15.1
 attrs==26.1.0
