@@ -3,6 +3,7 @@ The demo: invented data that must look like real data to the real pipeline, a bu
 The first group needs nothing but pandas; the second builds whole demos on a real Postgres (TEST_PG_ADMIN_URL) and opens every page of the website on them.
 """
 import inspect
+import html
 import os
 import re
 import sys
@@ -354,6 +355,12 @@ def test_every_page_of_the_real_website_opens_on_the_demo_and_says_it_is_a_demo(
         at = at.radio[0].set_value("Track record").run()
         assert "graded" in _plain(at).lower(), _plain(at)[:600]
         assert "waiting for results" in _plain(at).lower() and "locked pre-fight predictions" in _plain(at).lower(), _plain(at)[:600]
+        text = html.unescape(_plain(at))                                                                              # the page text as a visitor reads it (an apostrophe arrives as an entity)
+        assert "How much evidence is there?" in text, text[:600]
+        assert re.search(r"After \d+ graded fights|So far the|Only \d+ graded|No graded fights yet", text), text[-900:]       # at least one claim says where it stands
+        for question in ("Does the model-only winner pick beat a coin flip?", "Does the market-informed winner pick beat the bookmakers' line alone?",
+                         "Does the goes-the-distance prediction beat the plain decision rate?", "Does the market-informed distance prediction beat the model-only one?"):
+            assert question in text, question
 
 
 @needs_postgres
@@ -389,6 +396,23 @@ def test_the_insights_page_still_opens_when_a_deployment_has_no_market_informed_
     finally:
         with owner.begin() as c:
             c.exec_driver_sql("ALTER TABLE fight_picks_v3_hidden RENAME TO fight_picks_v3")
+
+
+@needs_postgres
+@needs_streamlit
+def test_the_evidence_meter_still_renders_when_the_live_picks_table_is_missing(tiny_demo):
+    owner = sa.create_engine(tiny_demo["owner_url"].replace("postgresql://", "postgresql+psycopg2://", 1))
+    with owner.begin() as c:
+        c.exec_driver_sql("ALTER TABLE upcoming_picks_v3 RENAME TO upcoming_picks_v3_hidden")
+    try:
+        with _app(tiny_demo) as at:
+            at = at.radio[0].set_value("Track record").run()
+            text = html.unescape(_plain(at))
+            assert not at.exception and not at.error and "How much evidence is there?" in text, text[:300]
+            assert "Does the market-informed winner pick beat the bookmakers' line alone?" in text and "No graded fights yet" in text      # the claim with no table says so; the rest are unaffected
+    finally:
+        with owner.begin() as c:
+            c.exec_driver_sql("ALTER TABLE upcoming_picks_v3_hidden RENAME TO upcoming_picks_v3")
 
 
 @needs_postgres

@@ -28,9 +28,12 @@ import streamlit as st
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "pipeline"))      # the shared scoring maths (numpy and pandas only)
 import distance_scores  # noqa: E402
 import insights  # noqa: E402
+import model_health  # noqa: E402
 from distance_ui import line_html as dist_line_html, section_html as dist_section_html, section_v2_html as dist_section_v2_html  # noqa: E402
 import game_ui  # noqa: E402
 import credits_ui  # noqa: E402
+import evidence  # noqa: E402
+import evidence_ui  # noqa: E402
 import insights_ui  # noqa: E402
 import title_rules  # noqa: E402
 
@@ -958,6 +961,11 @@ def page_track():
             module_html(f'<div class="note">Market-informed picks (they also use the betting line): {int(l3.n)} locked, {int(l3.g)} graded '
                         f'({int(l3.c)} right), {int(l3.w)} waiting for results. The picks above are the model-only ones.</div>')
 
+    try:                                  # the evidence meter: a new part of the page must never be able to break it
+        module_html(evidence_ui.section_html(evidence_data()))
+    except Exception:
+        pass
+
     sb = q("SELECT event_date, event_name, fights, correct, running_accuracy, total_fights FROM v2_scoreboard_running ORDER BY event_date")
     if sb.empty:
         module_html('<div class="sect"><h3>Backtest scoreboard</h3></div>')
@@ -1081,6 +1089,22 @@ def page_track():
 # ------------------------------------------------------------------------------------------------
 # layout
 # ------------------------------------------------------------------------------------------------
+@st.cache_data(ttl=900, show_spinner=False)
+def evidence_data() -> list:
+    """The evidence meter's four comparisons: the backtest frames (for what the backtest found and how much it varied) and the graded live frames, from read-only queries on public tables.
+    A table that is missing gives None for that claim, which the meter shows as nothing graded yet."""
+    def look(sql):
+        try:
+            return q(sql)
+        except (sa.exc.SQLAlchemyError, pd.errors.DatabaseError):
+            return None
+    winners = look("SELECT event_date, fighter_a, actual_winner, p_v2_a, market_prob_a, p_a_wins FROM fight_picks_v3 WHERE actual_winner IS NOT NULL")
+    backtest = {"v2": winners, "v3": winners, "d1": look("SELECT event_date, p_distance, p_base, went_distance FROM fight_distance_v1"),
+                "d2": look("SELECT event_date, p_distance, p_v1, went_distance FROM fight_distance_v2")}
+    live = {key: look(sql) for key, sql in model_health.QUERIES.items()}
+    return evidence.compute_all(backtest, live)
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def insights_data() -> dict:
     """Every finding on the Insights page, computed once an hour from three read-only queries (the heavy part is a little pandas over about 9,000 fights)."""
