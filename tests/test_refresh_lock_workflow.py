@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parent.parent
 TEXT = (ROOT / ".github" / "workflows" / "refresh-lock.yml").read_text(encoding="utf-8")
 TESTS_YML = (ROOT / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8")
 SECRET_EXPRESSION = re.compile(r"\$\{\{\s*secrets\.")
+PIP_INSTALL = re.compile(r'\bpip3?"?\s+install\b|\bpython3?\s+-m\s+pip\s+install\b')                                      # any way of writing a package install, quoted paths included
 
 
 def jobs() -> dict:
@@ -57,9 +58,19 @@ def test_the_job_that_runs_new_packages_is_read_only_has_no_secrets_and_leaves_n
 
 
 def test_it_installs_the_newest_versions_on_purpose_without_the_lock_and_only_from_the_requirements_files():
-    installs = [l.strip() for l in code_lines(jobs()["refresh"]) if "pip install" in l]
-    assert installs == [".refresh-venv/bin/pip install -r pipeline/requirements.txt -r app/requirements.txt pyflakes"]    # one resolution, no -c: the point is to see what is newest
-    assert "python -m venv .refresh-venv" in TEXT and '>> "$GITHUB_PATH"' in TEXT and "pip freeze > freeze.txt" in TEXT
+    installs = [l.strip() for l in code_lines(jobs()["refresh"]) if PIP_INSTALL.search(l)]
+    assert installs == ['"$RUNNER_TEMP/refresh-venv/bin/pip" install -r pipeline/requirements.txt -r app/requirements.txt pyflakes']    # one resolution, no -c: the point is to see what is newest
+    assert 'python -m venv "$RUNNER_TEMP/refresh-venv"' in TEXT and 'echo "$RUNNER_TEMP/refresh-venv/bin" >> "$GITHUB_PATH"' in TEXT and '/bin/pip" freeze > freeze.txt' in TEXT
+
+
+def test_the_environment_lives_outside_the_repository_folder_because_the_scans_read_every_file_under_it():
+    """The first real run failed here: an environment inside the checkout was scanned, and a package's own files (the certifi certificate bundle, example connection strings in
+    SQLAlchemy's source) were reported as credentials. The scanner skips only a fixed list of folder names, so nothing may be installed under the project folder."""
+    block = jobs()["refresh"]
+    assert ".refresh-venv" not in TEXT and "GITHUB_WORKSPACE" not in TEXT                                                      # the old location is gone
+    venv_lines = [l.strip() for l in code_lines(block) if "venv" in l and not l.strip().startswith("#")]
+    assert venv_lines and all("$RUNNER_TEMP/refresh-venv" in l for l in venv_lines), venv_lines                                # every use of it points into the runner's temp folder
+    assert block.index("$RUNNER_TEMP/refresh-venv") < block.index("scan_secrets.py")                                           # created before the scans run, and not under the project
 
 
 def test_it_runs_everything_the_tests_workflow_runs_against_the_new_versions_before_anything_is_proposed():
@@ -87,7 +98,8 @@ def test_the_job_that_can_write_installs_nothing_and_runs_only_this_repositorys_
     assert "needs: refresh" in block and "if: needs.refresh.outputs.changed == 'true'" in block
     assert re.search(r"^    permissions:\n      contents: write\n      pull-requests: write\n    steps:", block, flags=re.M)
     assert not SECRET_EXPRESSION.search(block)
-    for forbidden in ("pip install", "pip3", "setup-python", "npm ", "venv", "apt-get", "curl", "wget"):
+    assert not PIP_INSTALL.search(block)                                                                                   # however the install is written
+    for forbidden in ("pip3", "setup-python", "npm ", "venv", "apt-get", "curl", "wget"):
         assert forbidden not in block, forbidden
     assert "python3 tools/refresh_lock.py publish" in block                                                                # the repository's own script, standard library only
     assert block.count("uses: ") == 2 and "actions/checkout@v4" in block and "actions/download-artifact@v4" in block      # nothing but checkout and the artifact
@@ -131,7 +143,7 @@ def test_a_failure_is_announced_through_the_same_private_channel_as_the_other_wo
     assert re.search(r"^    permissions:\n      contents: read\n", block, flags=re.M)
     assert 'run: python3 pipeline/notify_failure.py "Refresh lock"' in block and "ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}" in block
     assert len(SECRET_EXPRESSION.findall(TEXT)) == 1 and SECRET_EXPRESSION.search(block)                                   # the only secret in the whole file, in the only job that does nothing else
-    assert "pip install" not in block
+    assert not PIP_INSTALL.search(block)
 
 
 def test_every_action_is_pinned_to_a_major_version_and_matches_the_tests_workflow():
@@ -147,7 +159,7 @@ def test_the_other_workflows_still_install_through_the_lock_and_this_one_is_the_
         text = (ROOT / ".github" / "workflows" / other).read_text(encoding="utf-8")
         assert all("-c constraints-ci.txt" in l for l in text.splitlines() if "pip install" in l and not l.strip().startswith("#")), other
     unlocked = [p.name for p in (ROOT / ".github" / "workflows").glob("*.yml")
-                if any("pip install" in l and "-c constraints-ci.txt" not in l and not l.strip().startswith("#") for l in p.read_text(encoding="utf-8").splitlines())]
+                if any(PIP_INSTALL.search(l) and "-c constraints-ci.txt" not in l and not l.strip().startswith("#") for l in p.read_text(encoding="utf-8").splitlines())]
     assert unlocked == ["refresh-lock.yml"], unlocked
 
 

@@ -199,3 +199,20 @@ def test_the_test_workflow_scans_the_files_and_the_full_history_before_the_tests
     text = (ROOT / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8")
     assert "fetch-depth: 0" in text and "python tools/scan_secrets.py\n" in text and "python tools/scan_secrets.py --history" in text
     assert text.index("scan_secrets.py --history") < text.index("python -m pytest -q tests")
+
+
+def test_an_environment_inside_the_project_is_scanned_which_is_why_the_lock_refresh_builds_its_own_elsewhere(tmp_path):
+    """What the first real run of the monthly refresh hit: the scanner skips only the folder names in SKIP_DIRS, so a package's own files under an environment with any other
+    name are read, and a certificate bundle and an example connection string in a package's source are reported. The workflow therefore creates its environment outside the project."""
+    env = tmp_path / ".refresh-venv" / "lib" / "python3.12" / "site-packages"
+    (env / "certifi").mkdir(parents=True)
+    (env / "certifi" / "cacert.pem").write_text("-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n", encoding="utf-8")
+    (env / "sqlalchemy").mkdir()
+    example = "postgresql+pg8000://" + "dbuser:" + "kx9Lm2pQr7wT" + "@" + "pghost.example.org/mydb"                              # assembled here so this file does not contain the pattern itself
+    (env / "sqlalchemy" / "pg8000.py").write_text(f'"""e.g. {example}"""\n', encoding="utf-8")
+    found = ss.scan_files(tmp_path)
+    flagged = {Path(path).name: kind for path, kind in found}
+    assert "cacert.pem" in flagged and "pg8000.py" in flagged, found                                                       # both of the kinds of file the real run reported
+    for skipped in ("venv", ".venv"):                                                                                        # the names it does skip, for contrast
+        assert skipped in ss.SKIP_DIRS
+    assert ".refresh-venv" not in ss.SKIP_DIRS

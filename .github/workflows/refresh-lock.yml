@@ -62,10 +62,12 @@ jobs:
 
       - name: Install the newest allowed versions into a brand-new environment (deliberately without the lock)
         run: |
-          python -m venv .refresh-venv
-          echo "$GITHUB_WORKSPACE/.refresh-venv/bin" >> "$GITHUB_PATH"
-          .refresh-venv/bin/pip install -r pipeline/requirements.txt -r app/requirements.txt pyflakes
-          .refresh-venv/bin/pip freeze > freeze.txt
+          # The environment lives OUTSIDE the repository folder: the credential scan and the tests that scan the project read every file under it,
+          # and a package's own files (a bundle of public certificates, example connection strings in its source) would be flagged as credentials.
+          python -m venv "$RUNNER_TEMP/refresh-venv"
+          echo "$RUNNER_TEMP/refresh-venv/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/refresh-venv/bin/pip" install -r pipeline/requirements.txt -r app/requirements.txt pyflakes
+          "$RUNNER_TEMP/refresh-venv/bin/pip" freeze > freeze.txt
 
       - name: Compare with the current lock (writes the new lock only if something changed)
         id: plan
