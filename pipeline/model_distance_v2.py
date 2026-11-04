@@ -216,12 +216,12 @@ def retirement_status(live: pd.DataFrame) -> dict:
     n = len(live)
     if n < RETIRE_AFTER_FIGHTS:
         return {"n": n, "retire": False, "verdict": None,
-                "text": f"keep both running ({n} graded fights so far; the rule needs at least {RETIRE_AFTER_FIGHTS} before it can say anything)"}
+                "text": f"keep ({n} graded fights so far; the rule needs at least {RETIRE_AFTER_FIGHTS} before it can say anything)"}
     verdict = distance_scores.paired_vs(live, "p_v2", "p_v1")["verdict"]
     if verdict == "clearly worse":
         return {"n": n, "retire": True, "verdict": verdict, "text": f"RETIRE the market-informed prediction: over {n} graded fights it is clearly worse than the model-only one"}
     relation = {"clearly better": "is clearly better than", "cannot be told apart": "cannot be told apart from"}[verdict]
-    return {"n": n, "retire": False, "verdict": verdict, "text": f"keep both running (over {n} graded fights the market-informed prediction {relation} the model-only one)"}
+    return {"n": n, "retire": False, "verdict": verdict, "text": f"keep (over {n} graded fights the market-informed prediction {relation} the model-only one)"}
 
 
 # ----------------------------------------------------------------------------------------------

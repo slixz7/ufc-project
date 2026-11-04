@@ -112,7 +112,7 @@ def test_the_rule_says_nothing_until_there_are_enough_graded_live_fights():
     live = _pair(299, lambda y: 0.5 + 0.2 * (1 - 2 * y))                                                               # wildly worse, but only 299 fights
     r = mdv2.retirement_status(live)
     assert r["retire"] is False and "299 graded fights so far" in r["text"] and "at least 300" in r["text"] and r["verdict"] is None
-    assert mdv2.retirement_status(live.head(12))["text"].startswith("keep both running (12 graded fights so far")
+    assert mdv2.retirement_status(live.head(12))["text"].startswith("keep (12 graded fights so far")
 
 
 def test_the_rule_retires_v2_only_when_it_is_clearly_worse_over_enough_fights():

@@ -198,3 +198,10 @@ def test_the_standalone_command_prints_the_report_and_exits_nonzero_only_when_so
     assert "Model health" in out and "no graded locked predictions yet" in out and "Nothing needs a person." in out
     monkeypatch.setattr(mh, "load_frames", lambda e: {"v2": winners(400, wrong_every=1)})
     assert mh.main() == 1 and "Needs a person:" in capsys.readouterr().out
+
+
+def test_every_rule_says_keep_in_the_same_words_when_nothing_has_fired():
+    for text in (mh.winner_v2(winners(40))["rule"]["text"], mh.winner_v3(winners(40))["rule"]["text"], mh.distance_v1(distance(40))["rule"]["text"],
+                 mh.distance_v2(distance(40))["rule"]["text"], mh.winner_v2(winners(400))["rule"]["text"], mh.distance_v2(distance(400))["rule"]["text"]):
+        assert text.startswith("keep ("), text                                                                            # one phrase for "no rule applies", wherever the rule lives
+    assert "keep both running" not in (ROOT / "pipeline" / "model_distance_v2.py").read_text(encoding="utf-8")                # the older wording that made one line read differently from the others
