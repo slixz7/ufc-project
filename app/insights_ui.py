@@ -94,6 +94,6 @@ def sections(d: dict) -> list[str]:
                 "the more experienced fighter won. More UFC fights usually means a longer career, so read this beside the age pattern below."),
         section("Age and reach: how much do they matter?", s["edges"], (edges_html(d["edges"]["age"], "The older fighter, by how much") + edges_html(d["edges"]["reach"], "The longer reach, by how much"))
                 if have(d["edges"]["age"]) or have(d["edges"]["reach"]) else "",
-                "A pattern is not a cause: older fighters and longer reaches also go with other things, such as weight class and who is booked against whom. The dashed line marks 50%."),
+                "A pattern is not a cause: older fighters and longer reaches also go with other things, such as weight class and who is booked against whom. Reach is recorded in whole inches. The dashed line marks 50%."),
     ]
     return out

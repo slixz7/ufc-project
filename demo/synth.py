@@ -121,7 +121,7 @@ class _World:
         base_h = next(w[1] for w in WEIGHT_CLASSES if w[0] == wc)
         h = float(np.round(r.normal(base_h, 4.5)))
         age = float(r.uniform(25, 34)) if seasoned else float(np.clip(r.normal(27.5, 3.2), 21, 38))
-        f = Fighter(fid=len(self.fighters), name=self.name(), wc=wc, height=h, reach=float(np.round(h + r.normal(3.0, 4.0))),
+        f = Fighter(fid=len(self.fighters), name=self.name(), wc=wc, height=h, reach=float(np.round((h + r.normal(3.0, 4.0)) / 2.54) * 2.54),
                     stance=str(r.choice(["Orthodox", "Southpaw", "Switch"], p=[.74, .21, .05])), dob=when - timedelta(days=int(age * 365.25)),
                     skill=float(r.normal(0, 1.0)), peak_age=float(r.normal(28.5, 1.8)), striking=float(r.beta(3, 3)), power=float(r.beta(2.5, 3.5)),
                     chin=float(r.beta(4, 3)), cardio=float(r.beta(4, 2.5)))

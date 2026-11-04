@@ -230,12 +230,26 @@ def test_age_and_reach_edges_use_the_older_and_the_longer_fighter_with_exact_bou
             (1, 0, 0, np.nan, 30, 0, 0)]    # age unknown: left out
     out = ins.edge_rows(_pairs(rows))
     assert [(r["label"], r["n"], r["k"]) for r in out["age"]] == [("2 to 5 years older", 1, 1), ("5 to 8 years older", 1, 1), ("8 or more years older", 1, 0)]
-    reach = [(1, 0, 0, 30, 30, 182.5, 180.0),      # a longer by exactly 2.5 -> "2.5 to 5": wins
-             (0, 0, 0, 30, 30, 180.0, 190.0),      # b longer by 10 -> "8 cm or more": b wins
-             (1, 0, 0, 30, 30, 180.0, 180.0),      # tie: left out
-             (1, 0, 0, 30, 30, np.nan, 180.0)]     # unknown: left out
+    inch = lambda n: n * 2.54                                                                                                # reach is whole inches converted to centimetres (the real column's values are 177.80, 180.34, 182.88 ...)
+    reach = [(1, 0, 0, 30, 30, inch(71), inch(70)),     # a longer by 1 inch (2.5400000000000205 cm after float noise): "1 inch longer": a wins
+             (0, 0, 0, 30, 30, inch(70), inch(74)),     # b longer by 4 inches: "4 to 5 inches longer": b (the longer) wins
+             (1, 0, 0, 30, 30, inch(76), inch(70)),     # a longer by 6 inches: "6 or more inches longer": a wins
+             (0, 0, 0, 30, 30, inch(72), inch(69)),     # a longer by 3 inches: "2 to 3 inches longer": a (the longer) LOST
+             (1, 0, 0, 30, 30, inch(70), inch(70)),     # tie: left out
+             (1, 0, 0, 30, 30, 177.8, 178.8),           # 1 cm (0.39 inch) apart: under half an inch, so not a gap: left out
+             (1, 0, 0, 30, 30, np.nan, 180.0)]          # unknown: left out
     out = ins.edge_rows(_pairs(reach))
-    assert [(r["label"], r["n"], r["k"]) for r in out["reach"]] == [("2.5 to 5 cm longer", 1, 1), ("8 cm or more longer", 1, 1)]
+    assert [(r["label"], r["n"], r["k"]) for r in out["reach"]] == [("1 inch longer", 1, 1), ("2 to 3 inches longer", 1, 0), ("4 to 5 inches longer", 1, 1), ("6 or more inches longer", 1, 1)]
+
+
+def test_every_whole_inch_gap_lands_in_its_bucket_however_the_float_arithmetic_rounds():
+    expected = {1: "1 inch longer", 2: "2 to 3 inches longer", 3: "2 to 3 inches longer", 4: "4 to 5 inches longer", 5: "4 to 5 inches longer", 6: "6 or more inches longer", 7: "6 or more inches longer",
+                9: "6 or more inches longer"}
+    for gap, label in expected.items():
+        for base in (68, 70, 72, 75):                                                                                       # different starting reaches give different float noise
+            rows = [(1, 0, 0, 30, 30, (base + gap) * 2.54, base * 2.54)]
+            assert [r["label"] for r in ins.edge_rows(_pairs(rows))["reach"]] == [label], (gap, base)
+    assert ins.REACH_LABELS == ["1 inch longer", "2 to 3 inches longer", "4 to 5 inches longer", "6 or more inches longer"] and ins.INCH_CM == 2.54
 
 
 # ---------------------------------------------------------------------------------------------- the sentences
@@ -282,9 +296,9 @@ def test_the_experience_and_edge_sentences_say_about_even_when_the_range_include
     clear = ins.sentence_experience({"gap": [{"label": "11 or more", **r(1000, 400)}], "debut": r(1000, 400)})
     assert clear.count("less often than not") == 2                                                                      # 40% of 1,000 is clearly below a coin flip
     assert ins.sentence_experience({"gap": [{"label": "11 or more", **r(10, 9)}], "debut": r(5, 1)}) is None
-    ed = {"age": [{"label": "8 or more years older", **r(400, 164)}], "reach": [{"label": "8 cm or more longer", **r(350, 196)}]}
+    ed = {"age": [{"label": "8 or more years older", **r(400, 164)}], "reach": [{"label": "6 or more inches longer", **r(350, 196)}]}
     assert ins.sentence_edges(ed) == ("The older fighter won 41% of 400 fights where the gap was 8 or more years older (less often than not). "
-                                      "The fighter with the longer reach won 56% of 350 fights where the gap was 8 cm or more longer (more often than not).")
+                                      "The fighter with the longer reach won 56% of 350 fights where the gap was 6 or more inches longer (more often than not).")
     assert ins.sentence_edges({"age": [], "reach": []}) is None
     assert ins.vs_even(r(1000, 540)) == "more often than not" and ins.vs_even(r(1000, 460)) == "less often than not"           # 54% and 46% of 1,000: ranges clear of 50%
     assert ins.vs_even(r(1000, 520)) == ins.vs_even(r(1000, 480)) == "about even: the range includes 50%"                    # 52% and 48% of 1,000 are not

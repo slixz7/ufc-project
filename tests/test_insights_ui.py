@@ -24,7 +24,7 @@ def findings():
             "favourites": [{"label": "Under 60%", "n": 100, "implied": 0.55, "fav_won": r(55, 100), "decision": r(50, 100)},
                            {"label": "80% or more", "n": 100, "implied": 0.85, "fav_won": r(85, 100), "decision": r(35, 100)}],
             "experience": {"gap": [{"label": "1 to 2 more", **r(50, 100)}, {"label": "11 or more", **r(60, 100)}], "debut": r(10, 20)},
-            "edges": {"age": [{"label": "Under 2 years older", **r(50, 100)}], "reach": [{"label": "2.5 to 5 cm longer", **r(55, 100)}]},
+            "edges": {"age": [{"label": "Under 2 years older", **r(50, 100)}], "reach": [{"label": "1 inch longer", **r(55, 100)}]},
             "sentences": {"method": "Of 1,000 fights since 2002, 49% went to a decision.", "rounds": None, "divisions": "Featherweight fights went the distance most often & A&B least.",
                           "trend": None, "favourites": "When the market had a favourite...", "upsets": None, "experience": "Fighters making their UFC debut...", "edges": "The older fighter won..."}}
 
@@ -60,7 +60,7 @@ def test_the_page_has_six_sections_in_order_each_with_its_heading_and_a_note_on_
 
 def test_every_row_label_reaches_the_page_as_written_the_regression_for_a_label_that_was_overwritten():
     page = " ".join(re.sub(r"<[^>]+>", " ", s) for s in ui.sections(findings()))
-    for label in ("Round 1", "Round 3", "2014", "2015", "Featherweight", "Under 60%", "80% or more", "Under 2 years older", "2.5 to 5 cm longer",
+    for label in ("Round 1", "Round 3", "2014", "2015", "Featherweight", "Under 60%", "80% or more", "Under 2 years older", "1 inch longer",
                   "1 to 2 more UFC fights", "11 or more UFC fights"):
         assert label in page, label                                                                                      # the experience rows once lost their "more UFC fights"
     assert "more more" not in page and "11 or more UFC fights" in page                                                       # no doubled word, which an earlier version had
@@ -149,3 +149,8 @@ def test_the_sentence_about_the_dashed_line_goes_with_the_bars_on_a_phone_but_on
     visible_on_a_phone = re.sub(r"<[^>]+>", "", re.sub(r'<span class="ins-bar">.*?</span>', "", favourites))                # the words a phone shows (the bars' own styling is not text)
     assert "dashed" not in visible_on_a_phone                                                                              # so nothing about a dashed line is left behind
     assert '<span class="ins-bar">' not in edges and "The dashed line marks 50%." in edges                                  # the age and reach tables keep their bars, and their sentence
+
+
+def test_the_age_and_reach_note_says_reach_is_recorded_in_whole_inches():
+    note = ui.sections(findings())[5]
+    assert "Reach is recorded in whole inches." in note and "cm" not in re.sub(r"<[^>]+>", "", note)                           # no centimetre left on the page for reach

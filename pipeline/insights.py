@@ -19,6 +19,9 @@ from small_sample import wilson
 ERA_START = pd.Timestamp("2002-01-01")
 EXPERIENCE_START = pd.Timestamp("2005-01-01")      # before this, a fighter's "earlier UFC fights" are cut short by the start of the data
 MIN_FIGHTS_SENTENCE = 30                           # a group smaller than this is shown, but never quoted in a sentence
+INCH_CM = 2.54                                     # reach is stored in whole inches converted to centimetres (every value in the real column is a multiple of 2.54), so gaps come in inches
+REACH_EDGES = [0.5, 1.5, 3.5, 5.5, np.inf]         # gaps in inches; a gap under half an inch is not a gap (it is left out like a tie)
+REACH_LABELS = ["1 inch longer", "2 to 3 inches longer", "4 to 5 inches longer", "6 or more inches longer"]
 FINISH_RESULTS = ("KO/TKO", "Submission", "TKO - Doctor's Stoppage")
 
 
@@ -183,7 +186,7 @@ def experience_rows(pairs: pd.DataFrame) -> dict:
 
 
 def edge_rows(pairs: pd.DataFrame) -> dict:
-    """Does the older fighter win, and the one with the longer reach? Grouped by the size of the gap. Exact ties are left out."""
+    """Does the older fighter win, and the one with the longer reach? Grouped by the size of the gap (reach in inches). Exact ties are left out, and so is a reach gap under half an inch."""
     out = {}
     age = pairs.dropna(subset=["age_a", "age_b"])
     gap = (age.age_a - age.age_b)
@@ -191,10 +194,10 @@ def edge_rows(pairs: pd.DataFrame) -> dict:
     keep = gap != 0
     out["age"] = _bucketed(gap[keep].abs(), [0, 2, 5, 8, np.inf], ["Under 2 years older", "2 to 5 years older", "5 to 8 years older", "8 or more years older"], older_won[keep])
     rc = pairs.dropna(subset=["reach_cm_a", "reach_cm_b"])
-    rgap = (rc.reach_cm_a - rc.reach_cm_b)
+    rgap = (rc.reach_cm_a - rc.reach_cm_b) / INCH_CM                                                          # in inches
     longer_won = pd.Series(np.where(rgap > 0, rc.a_won, 1 - rc.a_won), index=rc.index)
-    rkeep = rgap != 0
-    out["reach"] = _bucketed(rgap[rkeep].abs(), [0, 2.5, 5, 8, np.inf], ["Under 2.5 cm longer", "2.5 to 5 cm longer", "5 to 8 cm longer", "8 cm or more longer"], longer_won[rkeep])
+    rkeep = rgap.abs() >= REACH_EDGES[0]
+    out["reach"] = _bucketed(rgap[rkeep].abs(), REACH_EDGES, REACH_LABELS, longer_won[rkeep])
     return out
 
 

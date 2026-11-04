@@ -81,6 +81,13 @@ def test_the_tables_match_the_layouts_the_real_loader_fills(tiny):
         assert list(c.odds.columns) == ["fighter_a", "fighter_b", "odds_a", "odds_b"] and len(c.odds) == len(c.csv)
 
 
+def test_the_invented_reach_is_stored_like_the_real_column_whole_inches_in_centimetres(small):
+    reach = small.fighter_fights.reach_cm.dropna().round(6).unique()
+    inches = reach / 2.54
+    assert len(reach) > 10 and np.allclose(inches, np.round(inches), atol=1e-6)                                            # every value a multiple of 2.54, as in the real database
+    assert 55 <= inches.min() and inches.max() <= 90                                                                       # and a sensible human range, in inches
+
+
 def test_fights_are_internally_consistent(small):
     f, ff = small.fights, small.fighter_fights
     per = ff.groupby("fight_url")
