@@ -350,6 +350,7 @@ def test_every_page_of_the_real_website_opens_on_the_demo_and_says_it_is_a_demo(
             at = at.radio[0].set_value(page).run()
             assert not at.exception and not at.error and len(_plain(at)) > (600 if page == "Game" else 1500), (page, _plain(at)[:200])
             assert "DEMO" in _plain(at), page
+            assert "Data and credits. Everything on this demo site is invented" in _plain(at) and "Kaggle" not in _plain(at), page            # the footer, and it claims no real source
         at = at.radio[0].set_value("Track record").run()
         assert "graded" in _plain(at).lower(), _plain(at)[:600]
         assert "waiting for results" in _plain(at).lower() and "locked pre-fight predictions" in _plain(at).lower(), _plain(at)[:600]

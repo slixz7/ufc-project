@@ -26,6 +26,15 @@ PLAUSIBLE_START = timedelta(days=2)           # a start time further than this f
 EVENT_STARTS_DDL = """CREATE TABLE IF NOT EXISTS event_starts (
     event_date DATE PRIMARY KEY, first_start TIMESTAMPTZ NOT NULL, bouts INTEGER, distinct_times INTEGER, updated_at TIMESTAMPTZ)"""
 ODDS_DATASET_REPO = "https://github.com/nlbair/ufc-data.git"
+LOW_CREDITS = 30           # a line under "Needs your attention" well before the monthly quota runs out, so the lines never stop by surprise
+
+
+def credits_left(header) -> int | None:
+    """The API's x-requests-remaining header as a whole number, or None when it is missing or not a number."""
+    try:
+        return int(float(str(header).strip()))
+    except (TypeError, ValueError, OverflowError):
+        return None
 
 
 # ----------------------------------------------------------------------------------------------
@@ -118,13 +127,17 @@ SNAPSHOT_DDL = [
               MAX(market_prob_a) FILTER (WHERE rn_first = 1) AS first_prob_a,
               MAX(market_prob_a) FILTER (WHERE rn_last = 1)  AS last_prob_a
        FROM r GROUP BY bout_id""",
-    # the raw prices are kept private: the website's read-only logins (the current one and the old one) cannot see them (the app never shows odds)
+    # every betting-line table is kept private: the website's read-only logins (the current one and the old one) cannot see them (the app never shows odds). Each table is
+    # hidden only if it exists, so a fresh database or a restore in progress is no problem, and a table that is recreated is hidden again on the next run
     # (quote_ident and || rather than format('%I'): a % in a statement sent without parameters can upset the database driver)
-    """DO $$ DECLARE r text; BEGIN
+    """DO $$ DECLARE r text; t text; BEGIN
          FOREACH r IN ARRAY ARRAY['site_reader', 'app_reader'] LOOP
            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r) THEN
-             EXECUTE 'REVOKE ALL ON odds_snapshots FROM ' || quote_ident(r);
-             EXECUTE 'REVOKE ALL ON odds_bout_summary FROM ' || quote_ident(r);
+             FOREACH t IN ARRAY ARRAY['odds_snapshots', 'odds_bout_summary', 'fight_odds', 'upcoming_odds'] LOOP
+               IF to_regclass('public.' || t) IS NOT NULL THEN
+                 EXECUTE 'REVOKE ALL ON ' || quote_ident(t) || ' FROM ' || quote_ident(r);
+               END IF;
+             END LOOP;
            END IF;
          END LOOP;
        END $$""",
@@ -219,6 +232,10 @@ def step_odds(engine, today: date, rep: Report, dry_run: bool, save_raw: Path | 
         rep.add("Betting lines (The Odds API)", "No ODDS_API_KEY set, skipped. Bouts stay model-only until you add one.")
         return
     events, remaining = fetch_odds(key, session, save_raw)
+    left = credits_left(remaining)
+    if left is not None and left < LOW_CREDITS:
+        rep.need(f"Odds: only {left} Odds API credits are left this month (the warning level is {LOW_CREDITS}). When they reach 0 the lines stop and new bouts stay model-only; "
+                 "wait for the monthly reset or add credits.")
     now = datetime.now(timezone.utc)
     bouts = pd.read_sql(sa.text("""SELECT u.bout_id, u.event_date, u.fighter_a_name AS a, u.fighter_b_name AS b,
                                            (SELECT COUNT(*) FROM upcoming_picks_v3 p WHERE p.bout_id = u.bout_id) AS locked
@@ -288,7 +305,7 @@ def step_odds(engine, today: date, rep: Report, dry_run: bool, save_raw: Path | 
                 stored += res.rowcount
     lines = [f"{len(events)} fights listed by the API; {matched} matched to announced UFC bouts" + (" (dry run, not saved)" if dry_run else " and saved"),
              f"{skipped_locked} already have a locked market-informed pick (their lines are final)",
-             f"API credits left this month: {remaining if remaining is not None else 'unknown'}"]
+             f"API credits left this month: {left if left is not None else 'unknown'}"]
     if dry_run:
         lines.append(f"{len(snaps)} line snapshots would be added to the odds history")
     else:

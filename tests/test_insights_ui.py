@@ -117,3 +117,35 @@ def test_the_note_about_how_the_margin_is_removed_is_true_of_the_code_that_remov
     favourites = ui.sections(findings())[3]
     assert "divided out evenly across both fighters" in favourites and "does not by itself mean the line was wrong" in favourites
     assert "beside the age pattern below" in ui.sections(findings())[4]
+
+
+def test_the_favourites_table_marks_its_bars_so_a_phone_can_hide_them_and_keep_the_numbers():
+    h = ui.favourites_html(findings()["favourites"])
+    heads = re.findall(r'<th( class="ins-bar")?>([^<]*)</th>', h)
+    assert [(bool(c), t) for c, t in heads] == [(False, "The market made the favourite"), (False, "Fights"), (True, ""), (False, "Favourite won"), (True, ""), (False, "Went the distance")]
+    cells = re.findall(r'<td class="ins-bar"[^>]*>(.*?)</td>', h, flags=re.S)
+    assert len(cells) == 4 and all("width:" in c and not re.sub(r"<[^>]+>", "", c).strip() for c in cells)                 # two bar cells per row, and nothing else in them to lose
+    kept = re.sub(r'<td class="ins-bar".*?</td>', "", h, flags=re.S)
+    for number in ("55%", "85%", "market 55%", "market 85%", "50%", "35%"):
+        assert number in re.sub(r"<[^>]+>", "", kept), number                                                             # every number survives when the bars are hidden
+
+
+def test_the_phone_stylesheet_hides_those_bars_inside_the_narrow_screen_block_and_nowhere_else():
+    app = (ROOT / "app" / "streamlit_app.py").read_text(encoding="utf-8")
+    block = re.search(r"@media \(max-width:760px\) \{(.*?)\n\}", app, flags=re.S).group(1)
+    assert ".ufc .ins-bar {display:none;}" in block
+    assert app.count(".ins-bar {display:none;}") == 1                                                                       # so on a wide screen the bars show
+
+
+def test_the_other_tables_keep_their_bars_on_every_screen():
+    assert "ins-bar" not in ui.bars_html([{"label": "x", **r(5, 10)}], "label", "Head", even_marker=True)
+    assert "ins-bar" not in ui.method_html(findings()["method"]) and "ins-bar" not in ui.edges_html(findings()["edges"]["age"], "Age")
+
+
+def test_the_sentence_about_the_dashed_line_goes_with_the_bars_on_a_phone_but_only_where_the_bars_do():
+    secs = ui.sections(findings())
+    favourites, edges = secs[3], secs[5]
+    assert '<span class="ins-bar"> The dashed line marks 50%.</span>' in favourites                                         # hidden on a phone, together with the favourites bars
+    visible_on_a_phone = re.sub(r"<[^>]+>", "", re.sub(r'<span class="ins-bar">.*?</span>', "", favourites))                # the words a phone shows (the bars' own styling is not text)
+    assert "dashed" not in visible_on_a_phone                                                                              # so nothing about a dashed line is left behind
+    assert '<span class="ins-bar">' not in edges and "The dashed line marks 50%." in edges                                  # the age and reach tables keep their bars, and their sentence

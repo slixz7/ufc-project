@@ -148,7 +148,7 @@ The public site must connect with a login that can only read, so that a leaked p
 
 With your **owner** connection string loaded:
 
-- `python pipeline/db_roles.py reader` creates (or repairs) the login `site_reader`: SELECT on the public tables only, nothing on the private ones (`odds_snapshots`, `odds_bout_summary` and the game's tables). It checks the result and writes its connection string to `data/site_database_url.txt` without printing it. Put that in the site's secrets as `DATABASE_URL`, then delete the file.
+- `python pipeline/db_roles.py reader` creates (or repairs) the login `site_reader`: SELECT on the public tables only, nothing on the private ones (`odds_snapshots`, `odds_bout_summary`, `fight_odds`, `upcoming_odds` and the game's tables). It checks the result and writes its connection string to `data/site_database_url.txt` without printing it. Put that in the site's secrets as `DATABASE_URL`, then delete the file.
 - `python pipeline/db_roles.py audit` checks that login (no extra roles or powers, no write access, no private tables, cannot create anything) and flags an over-powered old login if one still exists. Run it after any change to database permissions.
 - `python pipeline/db_roles.py retire-old` strips the old login `app_reader` of every grant and, where Neon allows it, stops it logging in and replaces its password. Then delete it in the Neon console (Roles & Databases).
 - A leaked or lost read-only connection string: `python pipeline/db_roles.py reader --rotate-password`, then update the secret.

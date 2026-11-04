@@ -30,6 +30,7 @@ import distance_scores  # noqa: E402
 import insights  # noqa: E402
 from distance_ui import line_html as dist_line_html, section_html as dist_section_html, section_v2_html as dist_section_v2_html  # noqa: E402
 import game_ui  # noqa: E402
+import credits_ui  # noqa: E402
 import insights_ui  # noqa: E402
 import title_rules  # noqa: E402
 
@@ -175,6 +176,8 @@ label[data-testid="stRadioOption"][data-selected="true"] p {color:#171717; font-
 .ufc table.hist td {padding:7px 8px 7px 0; border-bottom:1px solid var(--hair); font-size:.95rem;}
 .ufc .note {color:var(--muted); font-style:italic; font-size:.9rem; margin-top:10px;}
 .ufc .foot {margin-top:42px; border-top:1px solid var(--ink); padding-top:10px; color:var(--muted); font-style:italic; font-size:.88rem;}
+.ufc .foot.credits {margin-top:12px; border-top:none; padding-top:0; font-size:.8rem;} .ufc .foot.credits b {font-style:normal; letter-spacing:.04em;}
+.ufc .foot a {color:inherit; text-decoration:underline;}
 
 /* goes the distance */
 .ufc .dist {margin-top:10px; font-size:.98rem;}
@@ -206,6 +209,7 @@ label[data-testid="stRadioOption"][data-selected="true"] p {color:#171717; font-
   .ufc .sheet {grid-template-columns:repeat(2,minmax(0,1fr));} .ufc .figs .v {font-size:2.3rem;}
   .ufc .figs .c {padding-right:16px; margin-right:16px;}
   .ufc .tr {gap:6px;} .ufc .tr .val {min-width:42px; font-size:.78rem;}
+  .ufc .ins-bar {display:none;}                                                  /* the favourites table: numbers only on a phone, where its bars shrink to stubs */
   label[data-testid="stRadioOption"] p {font-size:1.02rem; letter-spacing:.04em;} div[data-testid="stRadioGroup"] {gap:13px;}
 }
 </style>
@@ -1126,6 +1130,7 @@ def main():
         st.error("Couldn't load data right now. If the database was idle it may need a few seconds to wake up; "
                  "refresh the page and try again.")
     module_html(f'<div class="foot">{esc(DISCLAIMER)}</div>')
+    module_html(credits_ui.credits_html(demo=bool(os.getenv("DEMO_MODE"))))
 
 
 main()

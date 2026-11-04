@@ -8,7 +8,7 @@ The website's read-only database login: create it properly, check that it really
 Why this exists. A login made in Neon's web console is given extra powers: it joins Neon's own `neon_superuser` role, which can
 read AND WRITE every table and create other logins. Such a login is not read-only whatever grants you add. A login made with
 plain SQL (what `reader` does) has none of that. The audit checks the things that matter: no extra roles, no powerful attributes,
-no write access to anything, no access to the private tables (raw odds, the game's players and picks), no creating objects.
+no write access to anything, no access to the private tables (every betting-line table, the game's players and picks), no creating objects.
 
 Run with your OWNER connection string (DATABASE_URL). `reader` never prints the new password: it writes the connection string to
 data/site_database_url.txt (git ignores data/). Put it in the site's secrets as DATABASE_URL, then delete the file.
@@ -29,7 +29,9 @@ ROOT = Path(__file__).resolve().parent.parent
 URL_FILE = ROOT / "data" / "site_database_url.txt"
 READER_ROLE = "site_reader"
 LEGACY_READER = "app_reader"
-PRIVATE_TABLES = ("odds_snapshots", "odds_bout_summary", "game_players", "game_picks", "game_attempts")      # the site's login must never read these
+PRIVATE_TABLES = ("odds_snapshots", "odds_bout_summary", "fight_odds", "upcoming_odds", "game_players", "game_picks", "game_attempts")      # the site's login must never read these:
+#   the raw and historical betting lines, the live consensus lines, and the game. No page reads fight_odds or upcoming_odds (the site shows only the market-derived probability
+#   stored with each pick), so the login holds no access it does not need.
 WRITE_PRIVILEGES = ("INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER")
 RISKY_ATTRIBUTES = (("rolsuper", "act as a superuser"), ("rolcreaterole", "create other logins"), ("rolcreatedb", "create databases"),
                     ("rolbypassrls", "bypass row-level security"), ("rolreplication", "use replication"))

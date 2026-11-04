@@ -39,6 +39,8 @@ def pg():
     with owner.begin() as c:
         c.exec_driver_sql("CREATE TABLE fights (fight_url TEXT PRIMARY KEY)")
         c.exec_driver_sql("CREATE TABLE upcoming_picks_v2 (bout_id TEXT PRIMARY KEY, predicted_winner TEXT)")
+        c.exec_driver_sql("CREATE TABLE fight_odds (fight_id TEXT PRIMARY KEY, open_prob_f1 DOUBLE PRECISION)")                   # the historical lines: private, though no page reads them
+        c.exec_driver_sql("CREATE TABLE upcoming_odds (bout_id TEXT PRIMARY KEY, market_prob_a DOUBLE PRECISION)")                # the live consensus lines: likewise
     auto_odds.ensure_snapshot_tables(owner)                                                                         # the real private odds table and view
     with owner.begin() as c:                                                                                        # the grants sql/readonly_role.sql used to give the old login
         c.exec_driver_sql(f"GRANT USAGE ON SCHEMA public TO {n['legacy']}")
@@ -83,7 +85,8 @@ def test_a_console_style_login_is_condemned_for_every_reason(pg):
     n = pg["n"]
     problems = " | ".join(db_roles.audit_reader(pg["owner"], role=n["legacy"]))
     for expected in ("can create other logins", "can create databases", "can bypass row-level security", "can use replication", f"is a member of {n['ns']}",
-                     "INSERT/UPDATE/DELETE on fights", "can read odds_snapshots, which is private", "can read odds_bout_summary, which is private"):
+                     "INSERT/UPDATE/DELETE on fights", "can read odds_snapshots, which is private", "can read odds_bout_summary, which is private",
+                     "can read fight_odds, which is private", "can read upcoming_odds, which is private"):
         assert expected in problems, expected
     legacy = db_roles.audit_legacy(pg["owner"], role=n["legacy"])
     assert len(legacy) == 1 and "still exists and is not safe" in legacy[0] and "retire-old" in legacy[0]
@@ -102,7 +105,7 @@ def test_a_properly_made_login_passes_the_audit_and_is_genuinely_read_only(pg):
         assert c.execute(sa.text("SHOW statement_timeout")).scalar() in ("1min", "60s")
     for sql in ("INSERT INTO fights VALUES ('x')", "UPDATE fights SET fight_url = 'y'", "DELETE FROM fights", "TRUNCATE fights", "DROP TABLE fights",
                 "ALTER TABLE fights ADD COLUMN evil TEXT", "CREATE TABLE evil (x INT)", "CREATE ROLE rogue", "SELECT * FROM pg_authid",
-                "SELECT * FROM odds_snapshots", "SELECT * FROM odds_bout_summary"):
+                "SELECT * FROM odds_snapshots", "SELECT * FROM odds_bout_summary", "SELECT * FROM fight_odds", "SELECT * FROM upcoming_odds"):
         assert _refused(site, sql), f"the new login was allowed to run: {sql}"
     with pg["owner"].connect() as c:
         row = c.execute(sa.text("SELECT rolsuper, rolcreaterole, rolcreatedb, rolbypassrls, rolreplication FROM pg_roles WHERE rolname = :r"), {"r": pg["n"]["site"]}).fetchone()
@@ -136,6 +139,28 @@ def test_setup_is_repeatable_and_a_new_password_kills_the_old_one(pg):
     assert db_roles.audit_reader(pg["owner"], role=site) == []
 
 
+def test_re_running_the_repair_closes_access_to_the_two_tables_that_became_private_and_keeps_the_same_password(pg):
+    """The production scenario: the site's login was made before fight_odds and upcoming_odds were private, and can read both. The owner re-runs `db_roles.py reader` (no
+    --rotate-password): no new password is issued, so the connection string in the site's secrets keeps working, and the audit goes from two findings to none."""
+    site = pg["n"]["site"]
+    url = db_roles.setup_reader(pg["owner"], role=site, rotate_password=True)                                              # the password the site holds in its secrets
+    assert url
+    with pg["owner"].begin() as c:
+        c.exec_driver_sql(f"GRANT SELECT ON fight_odds, upcoming_odds TO {site}")                                          # how the real login still is
+    assert db_roles.audit_reader(pg["owner"], role=site) == [f"{site} can read fight_odds, which is private", f"{site} can read upcoming_odds, which is private"]
+    assert db_roles.setup_reader(pg["owner"], role=site) is None                                                         # the repair: nothing printed, no password changed
+    assert db_roles.audit_reader(pg["owner"], role=site) == []
+    engine = sa.create_engine(sa.engine.make_url(url).set(drivername="postgresql+psycopg2"))                              # the connection string issued BEFORE the repair
+    with engine.connect() as c:
+        c.exec_driver_sql("SELECT * FROM fights")
+        c.exec_driver_sql("SELECT * FROM upcoming_picks_v2")                                                             # still works, and still reads what the pages need
+    assert _refused(engine, "SELECT * FROM fight_odds") and _refused(engine, "SELECT * FROM upcoming_odds")
+
+
+def test_the_private_list_is_exactly_every_betting_line_table_and_the_games_tables():
+    assert set(db_roles.PRIVATE_TABLES) == {"odds_snapshots", "odds_bout_summary", "fight_odds", "upcoming_odds", "game_players", "game_picks", "game_attempts"}
+
+
 def test_the_daily_jobs_odds_hiding_covers_both_the_new_and_the_old_login_by_name(pg):
     admin = pg["admin"]
     with admin.connect() as c:
@@ -148,14 +173,17 @@ def test_the_daily_jobs_odds_hiding_covers_both_the_new_and_the_old_login_by_nam
         c.exec_driver_sql("CREATE ROLE app_reader LOGIN PASSWORD 'x'")
     if True:
         with pg["owner"].begin() as c:
-            c.exec_driver_sql("GRANT SELECT ON odds_snapshots, odds_bout_summary TO site_reader, app_reader")        # as the default privileges would have
-            assert c.execute(sa.text("SELECT has_table_privilege('site_reader', 'odds_snapshots', 'SELECT')")).scalar()
+            c.exec_driver_sql("GRANT SELECT ON odds_snapshots, odds_bout_summary, fight_odds, upcoming_odds TO site_reader, app_reader")        # as the default privileges would have
+            assert c.execute(sa.text("SELECT has_table_privilege('site_reader', 'fight_odds', 'SELECT')")).scalar()
         auto_odds.ensure_snapshot_tables(pg["owner"])                                                              # what every daily run does
         auto_odds.ensure_snapshot_tables(pg["owner"])                                                              # and it is safe to repeat
         with pg["owner"].connect() as c:
             for role in ("site_reader", "app_reader"):
-                for t in ("odds_snapshots", "odds_bout_summary"):
+                for t in ("odds_snapshots", "odds_bout_summary", "fight_odds", "upcoming_odds"):
                     assert not c.execute(sa.text("SELECT has_table_privilege(:r, :t, 'SELECT')"), {"r": role, "t": t}).scalar(), (role, t)
+        with pg["owner"].begin() as c:
+            c.exec_driver_sql("DROP TABLE upcoming_odds")                                                                # a fresh database, or a restore in progress: a table that is not there yet
+        auto_odds.ensure_snapshot_tables(pg["owner"])                                                                  # is no problem: each table is hidden only if it exists
 
 
 def test_the_game_audit_catches_the_old_login_reading_the_game_tables_just_as_it_did_on_the_real_database(pg):

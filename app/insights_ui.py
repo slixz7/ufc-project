@@ -18,11 +18,13 @@ def bar(value: float, even_marker: bool = False, colour: str = INK) -> str:
     return (f'<div style="position:relative;height:10px;background:{TRACK}"><div style="height:10px;width:{w:.1f}%;background:{colour}"></div>{marker}</div>')
 
 
-def _table(head: list[str], rows: list[str], widths: tuple[int, ...] | None = None) -> str:
-    """A table in the site's style. With `widths` (percentages) the columns are fixed, so bars in stacked tables start and end in the same place."""
+def _table(head: list[str], rows: list[str], widths: tuple[int, ...] | None = None, bar_columns: tuple[int, ...] = ()) -> str:
+    """A table in the site's style. With `widths` (percentages) the columns are fixed, so bars in stacked tables start and end in the same place. The header cells at `bar_columns`
+    are marked `ins-bar`, as are the bar cells below them, so a phone can hide the bars and keep the numbers."""
     cols = "<colgroup>" + "".join(f'<col style="width:{w}%">' for w in widths) + "</colgroup>" if widths else ""
     fixed = ' style="table-layout:fixed"' if widths else ""
-    return f'<table class="hist"{fixed}>' + cols + "<tr>" + "".join(f"<th>{html.escape(h)}</th>" for h in head) + "</tr>" + "".join(rows) + "</table>"
+    heads = "".join(f'<th{" class=" + chr(34) + "ins-bar" + chr(34) if i in bar_columns else ""}>{html.escape(h)}</th>' for i, h in enumerate(head))
+    return f'<table class="hist"{fixed}>' + cols + "<tr>" + heads + "</tr>" + "".join(rows) + "</table>"
 
 
 def _range(r: dict) -> str:
@@ -54,19 +56,20 @@ def rounds_html(rounds: list[dict]) -> str:
 
 def favourites_html(rows: list[dict]) -> str:
     body = [(f'<tr><td>{html.escape(r["label"])}</td><td class="mono muted">{r["n"]:,}</td>'
-             f'<td style="width:22%">{bar(r["fav_won"]["rate"], True)}</td><td class="mono"><b>{_pc(r["fav_won"]["rate"])}</b> <span class="muted">(market {_pc(r["implied"])})</span></td>'
-             f'<td style="width:22%">{bar(r["decision"]["rate"], False, ACCENT)}</td><td class="mono"><b>{_pc(r["decision"]["rate"])}</b></td></tr>') for r in rows]
-    return _table(["The market made the favourite", "Fights", "", "Favourite won", "", "Went the distance"], body)
+             f'<td class="ins-bar" style="width:22%">{bar(r["fav_won"]["rate"], True)}</td><td class="mono"><b>{_pc(r["fav_won"]["rate"])}</b> <span class="muted">(market {_pc(r["implied"])})</span></td>'
+             f'<td class="ins-bar" style="width:22%">{bar(r["decision"]["rate"], False, ACCENT)}</td><td class="mono"><b>{_pc(r["decision"]["rate"])}</b></td></tr>') for r in rows]
+    return _table(["The market made the favourite", "Fights", "", "Favourite won", "", "Went the distance"], body, bar_columns=(2, 4))
 
 
 def edges_html(rows: list[dict], head: str) -> str:
     return f'<div style="margin-top:18px">{bars_html(rows, "label", head, even_marker=True)}</div>' if rows else ""
 
 
-def section(title: str, sentence: str | None, body: str, how_to_read: str) -> str:
-    """A titled section: the sentence built from the numbers (or a plain note when there is too little data), the chart, and how to read it."""
+def section(title: str, sentence: str | None, body: str, how_to_read: str, phone_hidden: str = "") -> str:
+    """A titled section: the sentence built from the numbers (or a plain note when there is too little data), the chart, and how to read it. `phone_hidden` is text about the
+    bars that is dropped on a phone along with them (the favourites table shows numbers only there)."""
     lead = f'<div class="aside" style="margin-top:0;max-width:780px"><b>{html.escape(sentence)}</b></div>' if sentence else f'<div class="note">{NOT_ENOUGH}</div>'
-    return f'<div class="sect"><h3>{html.escape(title)}</h3></div>{lead}{body}<div class="note">{html.escape(how_to_read)}</div>'
+    return f'<div class="sect"><h3>{html.escape(title)}</h3></div>{lead}{body}<div class="note">{html.escape(how_to_read)}{f'<span class="ins-bar">{html.escape(phone_hidden)}</span>' if phone_hidden else ""}</div>'
 
 
 def sections(d: dict) -> list[str]:
@@ -84,7 +87,7 @@ def sections(d: dict) -> list[str]:
         section("Favourites, upsets and finishing", " ".join(x for x in (s["favourites"], s["upsets"]) if x) or None, favourites_html(d["favourites"]) if have(d["favourites"]) else "",
                 "The market's price is the betting line with the bookmaker's margin divided out evenly across both fighters, a simple method that tends to make heavy favourites look "
                 "a little weaker than they are, so a favourite winning a few points more often than priced here does not by itself mean the line was wrong. The site never shows odds: "
-                "these are groups of fights, not individual lines, and only fights that have a line are included. The dashed line marks 50%."),
+                "these are groups of fights, not individual lines, and only fights that have a line are included.", phone_hidden=" The dashed line marks 50%."),
         section("Does UFC experience matter?", s["experience"], bars_html([{**r, "label": f"{r['label']} UFC fights"} for r in d["experience"]["gap"]], "label",
                                                                         "The fighter with") if have(d["experience"]["gap"]) else "",
                 "\"UFC fights\" counts a fighter's fights in this data before the one being looked at (from 2005 on), so it misses fights in other promotions. The bars show how often "
