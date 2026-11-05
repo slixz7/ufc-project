@@ -152,7 +152,7 @@ def test_every_action_is_pinned_to_a_major_version_and_matches_the_tests_workflo
     for action in ("actions/checkout", "actions/setup-python"):
         assert re.search(rf"{action}@v\d+", TEXT).group(0) == re.search(rf"{action}@v\d+", TESTS_YML).group(0)           # the same major versions the rest of the project uses
     up, down = re.search(r"actions/upload-artifact@v(\d+)", TEXT), re.search(r"actions/download-artifact@v(\d+)", TEXT)
-    assert up and down and up.group(1) == down.group(1)                                 # a matching pair: v4 artifacts only work with v4
+    assert up and down and int(up.group(1)) >= 4 and int(down.group(1)) >= 4                                 # both on the v4+ artifact service (they need not share a major; v3 cannot talk to it)
 
 
 def test_the_other_workflows_still_install_through_the_lock_and_this_one_is_the_only_deliberate_exception():
