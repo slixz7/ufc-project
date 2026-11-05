@@ -52,6 +52,19 @@ def post(webhook_url: str, payload: dict, timeout: float = TIMEOUT_SECONDS) -> b
         return False
 
 
+def send_text(text: str, env=None, post_func=None) -> str:
+    """Post a short plain message to the same private channel, with the same checks as a failure alert. Returns 'sent', 'not set', 'not discord' or 'failed', so a caller can
+    say what happened. The address is never printed, and nothing in the message can ping anybody."""
+    env = os.environ if env is None else env
+    webhook = (env.get("ALERT_WEBHOOK_URL") or "").strip()
+    if not webhook:
+        return "not set"
+    if not webhook.startswith(ALLOWED_PREFIXES):
+        return "not discord"
+    payload = {"content": " ".join(str(text).split())[:MAX_MESSAGE], "allowed_mentions": {"parse": []}}
+    return "sent" if (post_func or post)(webhook, payload) else "failed"
+
+
 def main(argv=None, env=None) -> int:
     env = os.environ if env is None else env
     argv = sys.argv[1:] if argv is None else argv

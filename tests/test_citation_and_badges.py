@@ -1,5 +1,5 @@
 """
-The front door's last details: status badges for the four workflows, and CITATION.cff (which makes GitHub show "Cite this repository"). The citation file was also validated against the
+The front door's last details: status badges for the five workflows, and CITATION.cff (which makes GitHub show "Cite this repository"). The citation file was also validated against the
 official CFF 1.2.0 schema with cffconvert; these tests keep it consistent with the rest of the project and need nothing but the standard library (PyYAML is used only if present).
 """
 import re
@@ -19,18 +19,18 @@ RUNBOOK = (ROOT / "docs" / "RUNBOOK.md").read_text(encoding="utf-8")
 
 def test_the_readme_shows_a_status_badge_for_each_workflow_in_a_row_under_the_title():
     lines = README.splitlines()
-    top = lines[lines.index("# UFC Fight Predictor") + 2:][:4]
-    expected = [("Tests", "tests.yml"), ("Daily update", "auto-update.yml"), ("Weekly backup", "backup.yml"), ("Lock refresh", "refresh-lock.yml")]
+    top = lines[lines.index("# UFC Fight Predictor") + 2:][:5]
+    expected = [("Tests", "tests.yml"), ("Daily update", "auto-update.yml"), ("Weekly backup", "backup.yml"), ("Lock refresh", "refresh-lock.yml"), ("Live site check", "smoke-test.yml")]
     for line, (name, workflow) in zip(top, expected):
         url = f"{credits_ui.REPO}/actions/workflows/{workflow}"
         assert line == f"[![{name}]({url}/badge.svg)]({url})", line                                                       # the image and the link both point at that workflow
         assert (ROOT / ".github" / "workflows" / workflow).exists(), workflow                                             # and the workflow exists
-    assert lines[lines.index("# UFC Fight Predictor") + 6] == ""                                                           # four consecutive lines, so they render as one row
+    assert lines[lines.index("# UFC Fight Predictor") + 7] == ""                                                           # five consecutive lines, so they render as one row
 
 
 def test_the_badges_cover_every_workflow_the_repository_has_exactly_once():
     names = {p.name for p in (ROOT / ".github" / "workflows").glob("*.yml")}
-    assert names == {"tests.yml", "auto-update.yml", "backup.yml", "refresh-lock.yml"}
+    assert names == {"tests.yml", "auto-update.yml", "backup.yml", "refresh-lock.yml", "smoke-test.yml"}
     assert all(README.count(f"/workflows/{n}/badge.svg") == 1 for n in names)                                              # a new workflow must get a badge, and none may appear twice (an earlier one was left behind lower down)
 
 

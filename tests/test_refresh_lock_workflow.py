@@ -158,8 +158,13 @@ def test_the_other_workflows_still_install_through_the_lock_and_this_one_is_the_
     for other in ("tests.yml", "auto-update.yml", "backup.yml"):
         text = (ROOT / ".github" / "workflows" / other).read_text(encoding="utf-8")
         assert all("-c constraints-ci.txt" in l for l in text.splitlines() if "pip install" in l and not l.strip().startswith("#")), other
+    def pinned_file(line):                                                                                                  # an install from a file in which every line is an exact version
+        m = re.search(r"-r (\S+)", line)
+        path = ROOT / m.group(1) if m else None
+        rows = [l for l in path.read_text(encoding="utf-8").splitlines() if l.strip() and not l.startswith("#")] if path and path.exists() else []
+        return bool(rows) and all(re.fullmatch(r"[A-Za-z0-9._-]+==\d+(\.\d+)+", l) for l in rows)
     unlocked = [p.name for p in (ROOT / ".github" / "workflows").glob("*.yml")
-                if any(PIP_INSTALL.search(l) and "-c constraints-ci.txt" not in l and not l.strip().startswith("#") for l in p.read_text(encoding="utf-8").splitlines())]
+                if any(PIP_INSTALL.search(l) and "-c constraints-ci.txt" not in l and not pinned_file(l) and not l.strip().startswith("#") for l in p.read_text(encoding="utf-8").splitlines())]
     assert unlocked == ["refresh-lock.yml"], unlocked
 
 

@@ -55,6 +55,7 @@ jobs:
           ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
           KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          DB_SIZE_LIMIT_MB: ${{ vars.DB_SIZE_LIMIT_MB }}                  # the host's storage cap in MB (optional; the watchdog assumes 500)
           DRY: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && '--dry-run' || '' }}
         run: python pipeline/auto_update.py all $DRY
 
@@ -72,6 +73,18 @@ jobs:
           git commit -m "Update the pick log and README numbers"
           git pull --rebase origin main
           git push origin HEAD:main
+
+      - name: Heartbeat, the run succeeded (a missing one is how a job that never ran is noticed)
+        if: ${{ success() && (github.event_name == 'schedule' || inputs.dry_run != true) }}
+        env:
+          HEARTBEAT_URL: ${{ secrets.HEARTBEAT_URL }}                  # a dead-man's-switch check's ping address; if it is not set, nothing is sent
+        run: python pipeline/heartbeat.py
+
+      - name: Heartbeat, the run failed
+        if: ${{ failure() && (github.event_name == 'schedule' || inputs.dry_run != true) }}
+        env:
+          HEARTBEAT_URL: ${{ secrets.HEARTBEAT_URL }}
+        run: python pipeline/heartbeat.py fail
 
       - name: Tell the alert channel that the run failed
         if: failure()

@@ -1,0 +1,80 @@
+name: Live site check
+
+# Opens every page of the LIVE site in a real browser and checks that it works: the page opens (a sleeping app is woken first), shows the text it always shows, shows none of the signs of
+# a broken page, and the header's "Results through" date is not more than 21 days old. It exists because everything else alerts when a job FAILS, and nothing noticed when the site
+# itself broke (for example a database permission change that left one page unable to load). It only READS the site: no sign-in, no secrets.
+#
+# It runs every day after the daily job (14:17 UTC), on demand, and after every push to main once the Tests workflow has passed (it waits four minutes first, so the host has time to
+# redeploy). A failure is retried once inside the tool before it counts, then posts to the private alert channel, with a screenshot of the failing page saved as a run artifact.
+#
+# Optional: set the repository variable SITE_URL if the site moves; it defaults to the live address.
+on:
+  schedule:
+    - cron: "20 15 * * *"          # every day at 15:20 UTC, an hour after the daily job
+  workflow_dispatch:
+  workflow_run:
+    workflows: ["Tests"]
+    types: [completed]
+    branches: [main]
+
+permissions: {}                    # nothing by default: each job asks for exactly what it needs
+
+concurrency:
+  group: live-site-check
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: Open every page of the live site
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Give the host time to redeploy (only after a push)
+        if: ${{ github.event_name == 'workflow_run' }}
+        run: sleep 240
+
+      - name: Install the browser driver (exact version, from the pinned file)
+        run: |
+          pip install -r tools/smoke-requirements.txt
+          python -m playwright install --with-deps chromium
+
+      - name: Open every page
+        env:
+          SITE_URL: ${{ vars.SITE_URL || 'https://ufc-predictor.streamlit.app/' }}
+        run: python tools/smoke_test.py "$SITE_URL" --out smoke_out
+
+      - name: Keep the screenshots of a failing page
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-failure
+          path: smoke_out
+          retention-days: 7
+          if-no-files-found: ignore
+
+  alert:
+    name: Tell the alert channel if the live site has a problem
+    needs: check
+    if: failure()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tell the alert channel that the check failed
+        env:
+          ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}          # its own private channel, never the one the friends read; if it is not set, nothing is sent
+        run: python3 pipeline/notify_failure.py "Live site check"

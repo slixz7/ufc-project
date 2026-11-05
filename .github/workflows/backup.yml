@@ -76,6 +76,27 @@ jobs:
           git commit -m "Backup $(date -u +%Y-%m-%d)"
           git push
 
+      - name: Warn if the backup token is about to expire (it never fails the backup)
+        if: always()
+        continue-on-error: true
+        env:
+          BACKUP_REPO_TOKEN: ${{ secrets.BACKUP_REPO_TOKEN }}
+          ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
+          BACKUP_REPO: ${{ github.repository_owner }}/ufc-project-backups
+        run: python pipeline/token_expiry.py --repo "$BACKUP_REPO"
+
+      - name: Heartbeat, the backup succeeded (a missing one is how a backup that never ran is noticed)
+        if: success()
+        env:
+          BACKUP_HEARTBEAT_URL: ${{ secrets.BACKUP_HEARTBEAT_URL }}
+        run: python pipeline/heartbeat.py --env BACKUP_HEARTBEAT_URL
+
+      - name: Heartbeat, the backup failed
+        if: failure()
+        env:
+          BACKUP_HEARTBEAT_URL: ${{ secrets.BACKUP_HEARTBEAT_URL }}
+        run: python pipeline/heartbeat.py fail --env BACKUP_HEARTBEAT_URL
+
       - name: Tell the alert channel that the backup failed
         if: failure()
         env:

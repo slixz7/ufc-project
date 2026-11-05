@@ -48,6 +48,7 @@ import digest
 import model_distance
 import model_distance_v2
 import model_health
+import watchdog
 import model_v2
 import model_v3
 import pick_log
@@ -185,6 +186,7 @@ def run(args) -> int:
         "results": lambda: step_results(engine, today, rep, args.dry_run, workdir),
         "refresh-odds": lambda: step_refresh_odds(engine, today, rep, args.dry_run, workdir, args.command == "refresh-odds"),
         "health": lambda: model_health.step_health(engine, today, rep),
+        "watchdog": lambda: watchdog.step_watchdog(engine, today, rep),
         "readme": lambda: readme_numbers.step_readme(engine, today, rep, args.dry_run, write=os.getenv("GITHUB_ACTIONS") == "true", forced=args.command == "readme"),
         "digest": lambda: digest.run_digest(engine, today, rep, args.dry_run),
     }
@@ -212,7 +214,7 @@ def run(args) -> int:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Hands-off upkeep for the UFC Fight Predictor")
-    ap.add_argument("command", choices=["all", "cards", "v2", "odds", "lock", "pick-log", "results", "refresh-odds", "health", "readme", "digest", "odds-history", "discord-test"])
+    ap.add_argument("command", choices=["all", "cards", "v2", "odds", "lock", "pick-log", "results", "refresh-odds", "health", "watchdog", "readme", "digest", "odds-history", "discord-test"])
     ap.add_argument("--dry-run", action="store_true", help="look and report; write nothing")
     ap.add_argument("--today", help="(testing only) pretend today is YYYY-MM-DD")
     ap.add_argument("--write-pick-log", action="store_true", help="(pick-log) write the public pick log from this computer too; normally only the GitHub job does")
