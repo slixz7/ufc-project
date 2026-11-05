@@ -31,6 +31,7 @@ import insights  # noqa: E402
 import model_health  # noqa: E402
 from distance_ui import line_html as dist_line_html, section_html as dist_section_html, section_v2_html as dist_section_v2_html  # noqa: E402
 import game_ui  # noqa: E402
+import about_ui  # noqa: E402
 import credits_ui  # noqa: E402
 import distance_why_ui  # noqa: E402
 import evidence  # noqa: E402
@@ -182,6 +183,7 @@ label[data-testid="stRadioOption"][data-selected="true"] p {color:#171717; font-
 .ufc .foot {margin-top:42px; border-top:1px solid var(--ink); padding-top:10px; color:var(--muted); font-style:italic; font-size:.88rem;}
 .ufc .foot.credits {margin-top:12px; border-top:none; padding-top:0; font-size:.8rem;} .ufc .foot.credits b {font-style:normal; letter-spacing:.04em;}
 .ufc .foot a {color:inherit; text-decoration:underline;}
+.ufc .about {margin:2px 0 14px;} .ufc .about a {color:inherit; text-decoration:underline;}
 
 /* goes the distance */
 .ufc .dist {margin-top:10px; font-size:.98rem;}
@@ -1165,6 +1167,7 @@ def main():
                     'running on made-up data, so the numbers show how the system works and say nothing about real fights.</div>')
     page = st.radio("Navigate", ["Upcoming", "Past events", "Fighters", "Track record", "Insights", "Game"],
                     horizontal=True, label_visibility="collapsed")
+    module_html(about_ui.about_html(demo=bool(os.getenv("DEMO_MODE"))))                  # a collapsed row for a first-time visitor, on every page
     try:
         {"Upcoming": page_upcoming, "Past events": page_past, "Fighters": page_fighters,
          "Track record": page_track, "Insights": page_insights, "Game": page_game}[page]()

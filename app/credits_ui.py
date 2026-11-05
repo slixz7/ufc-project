@@ -23,6 +23,9 @@ def _a(url: str, text: str) -> str:
     return f'<a href="{html.escape(url, quote=True)}" target="_blank" rel="noopener noreferrer">{html.escape(text)}</a>'
 
 
+link = _a                                                                                    # the same safe link, for the other pages that need one
+
+
 def credits_html(demo: bool = False) -> str:
     if demo:
         return ('<div class="foot credits"><b>Data and credits.</b> Everything on this demo site is invented. The real project credits its data sources and their licences in the '
