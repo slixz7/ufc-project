@@ -15,7 +15,9 @@ What it does, in order, which is also the recovery recipe if the real database w
   3. creates every other table with the project's own setup steps (upcoming.py setup, model_v2.py setup, model_v3.py setup, model_distance.py
      setup, model_distance_v2.py setup, and the tables the daily job and the friends' game create for themselves);
   4. restores each table with `backup.py restore` (which only loads an empty table and never deletes);
-  5. compares what came back with what was backed up: the number of rows, and for every column the number of filled-in cells.
+  5. compares what came back with what was backed up: the number of rows, and for every column the number of filled-in cells;
+  6. checks that the next insert would work: every auto-number counter must be past the restored ids (a restore that loads rows with their old ids but leaves the counter at 1
+     looks perfect row for row and then fails on the first new row).
 It ends with RESTORE OK, or with the list of everything that did not come back.
 
 A table that is in the backup but that no setup step creates is reported as a gap. That means the recipe above is out of date for a
@@ -165,7 +167,8 @@ def run_drill(directory: Path, engine, log=print) -> dict:
             except (ValueError, sa.exc.SQLAlchemyError) as exc:
                 entry["problems"].append(str(exc).splitlines()[0][:200])
         out.append(entry)
-    return {"ok": all(not e["problems"] for e in out), "stopped": [], "tables": out}
+    counters = backup.check_sequences(engine)
+    return {"ok": all(not e["problems"] for e in out) and not counters, "stopped": [], "tables": out, "sequence_problems": counters}
 
 
 def format_report(result: dict) -> str:
@@ -176,11 +179,17 @@ def format_report(result: dict) -> str:
         lines.append(f"{e['table']:28s} {e['rows']:13,d} {('-' if e['restored'] is None else format(e['restored'], ',d')):>9s}   "
                      + ("PROBLEM" if e["problems"] else "legacy: not restored" if e.get("legacy") else "ok"))
     bad = [e for e in result["tables"] if e["problems"]]
+    counters = result.get("sequence_problems", [])
+    if counters:
+        lines.append("\nWHAT WOULD BREAK THE NEXT INSERT:")
+        lines += [f"  {p}" for p in counters]
     if bad:
         lines.append("\nWHAT DID NOT COME BACK CLEANLY:")
         for e in bad:
             lines += [f"  {e['table']}: {p}" for p in e["problems"]]
         lines.append("\nRESTORE FAILED for the tables above. Everything else came back; fix the cause, then run the drill again.")
+    elif counters:
+        lines.append("\nRESTORE FAILED: every table came back, but the counters above are behind the restored ids, so the next new row would be refused.")
     else:
         legacy = [e for e in result["tables"] if e.get("legacy")]
         kept = [e for e in result["tables"] if not e.get("legacy")]

@@ -149,8 +149,51 @@ def verify(directory: Path) -> list[str]:
     return problems
 
 
+def serial_columns(engine, table: str | None = None) -> list[tuple[str, str, str]]:
+    """(table, column, counter) for every column of the public schema that is filled in by an auto-number counter (today only odds_snapshots.id). Only Postgres has them: any
+    other database (the tests restore into SQLite too) has none."""
+    if engine.dialect.name != "postgresql":
+        return []
+    with engine.connect() as conn:
+        rows = conn.execute(sa.text("""SELECT table_name, column_name FROM information_schema.columns
+                                       WHERE table_schema = 'public' AND column_default LIKE 'nextval(%' ORDER BY 1, 2""")).fetchall()
+        found = []
+        for t, c in rows:
+            if table is not None and t != table:
+                continue
+            counter = conn.execute(sa.text("SELECT pg_get_serial_sequence(:t, :c)"), {"t": f'public."{t}"', "c": c}).scalar()
+            if counter:
+                found.append((t, c, counter))
+    return found
+
+
+def fix_sequences(engine, table: str | None = None) -> list[str]:
+    """A restore loads rows WITH their old ids, but an auto-number counter starts again at 1: the next insert would collide with a restored row. This moves every counter
+    (or just the one table's) past the largest id, and says what it did. Safe to repeat."""
+    done = []
+    for t, c, counter in serial_columns(engine, table):
+        with engine.begin() as conn:
+            top = int(conn.execute(sa.text(f'SELECT COALESCE(MAX("{c}"), 0) FROM public."{t}"')).scalar())
+            conn.execute(sa.text("SELECT setval(CAST(:s AS regclass), :v, false)"), {"s": counter, "v": top + 1})
+        done.append(f"{t}.{c}: the next id is {top + 1}")
+    return done
+
+
+def check_sequences(engine) -> list[str]:
+    """Problems: every auto-number counter whose next value is not above the largest id in its table (so the next insert would fail with a duplicate key)."""
+    problems = []
+    for t, c, counter in serial_columns(engine):
+        with engine.connect() as conn:
+            top = int(conn.execute(sa.text(f'SELECT COALESCE(MAX("{c}"), 0) FROM public."{t}"')).scalar())
+            last, called = conn.execute(sa.text(f"SELECT last_value, is_called FROM {counter}")).one()
+        nxt = int(last) + (1 if called else 0)
+        if nxt <= top:
+            problems.append(f"{t}.{c}: the next auto-number would be {nxt} but the table already holds id {top}, so the next insert would fail with a duplicate key")
+    return problems
+
+
 def restore_table(engine, directory: Path, table: str) -> int:
-    """Load a backed-up table into an existing table that has no rows. Never deletes. Returns the number of rows loaded."""
+    """Load a backed-up table into an existing table that has no rows, then move its auto-number counter (if it has one) past the restored ids. Never deletes. Returns the number of rows loaded."""
     d = Path(directory)
     problems = [p for p in verify(d) if p.startswith(f"{table}:") or p.startswith(MANIFEST)]
     if problems:
@@ -171,6 +214,7 @@ def restore_table(engine, directory: Path, table: str) -> int:
         raise ValueError(f"{table}: the backup has columns the table does not: {sorted(unknown)}")
     with engine.begin() as conn:
         df.to_sql(table, conn, if_exists="append", index=False, method="multi", chunksize=200)
+    fix_sequences(engine, table)                                                                   # the counters must carry on after the restored ids, or the next insert collides
     return len(df)
 
 
