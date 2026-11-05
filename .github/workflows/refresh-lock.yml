@@ -98,7 +98,7 @@ jobs:
 
       - name: Hand the proposed lock to the next job
         if: steps.plan.outputs.changed == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: new-lock
           path: constraints-ci.txt
@@ -117,7 +117,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4                 # this repository's own main branch: the only code this job runs
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: new-lock
           path: ${{ runner.temp }}/proposed
