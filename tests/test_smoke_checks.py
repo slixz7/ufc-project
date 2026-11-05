@@ -154,17 +154,18 @@ def test_a_sleeping_app_is_woken_and_given_the_longer_wait_before_it_counts_as_d
     assert out.ok and out.woke and ("wake", 150) in fake.log
     never = Fake(home="This app has gone to sleep due to inactivity", asleep=True, clock=Clock())
     out = run_pass(never, wake_timeout=150)
-    assert not out.ok and out.woke and out.site_problems[0] == "the site did not load: no header after the wait (it had to be woken)" and any("gone to sleep" in p for p in out.site_problems)
+    assert not out.ok and out.woke and out.site_problems[0] == "the site did not load: no header after the wait (it had to be woken); the page showed: \"This app has gone to sleep due to inactivity\"" and any("gone to sleep" in p for p in out.site_problems)
     assert out.screenshot == "site" and out.pages == []                                                                           # nothing else is tried on a site that did not load
     assert sum(never.clock.pauses) >= 150                                                                                           # and a woken app really was given the long wait first
     quick = Fake(home="", clock=Clock())
     run_pass(quick, page_timeout=45, wake_timeout=150)
-    assert 45 <= sum(quick.clock.pauses) < 60                                                                                       # while a site that was not asleep gets the short one
+    assert sm.FIRST_LOAD_TIMEOUT <= sum(quick.clock.pauses) < sm.FIRST_LOAD_TIMEOUT + 15                                          # while a site that was not asleep gets the first-load wait (a host that is restarting needs minutes)
+    assert sm.FIRST_LOAD_TIMEOUT == 120.0 and sm.RETRY_WAIT == 90.0
 
 
 def test_a_site_that_loads_nothing_is_reported_once_without_visiting_pages():
-    out = run_pass(Fake(home="", clock=Clock()), page_timeout=3)
-    assert out.site_problems == ["the site did not load: no header after the wait"] and out.pages == []
+    out = run_pass(Fake(home="", clock=Clock()), first_load_timeout=3)
+    assert out.site_problems == ["the site did not load: no header after the wait; the page showed: nothing (the page was empty)"] and out.pages == []
 
 
 def test_stale_results_are_a_site_problem_even_if_every_page_works():
@@ -257,11 +258,11 @@ def test_only_an_https_site_or_a_local_one_may_be_checked(capsys):
         assert drive([url, "--retries", "0"], Fake(pages=good_pages())) == 0
 
 
-def test_the_browser_is_closed_even_when_the_check_itself_crashes():
-    class Crashing(Fake):
-        def open(self, url):
-            raise RuntimeError("browser died")
-    fake = Crashing()
+def test_the_browser_is_closed_even_when_the_check_itself_crashes(monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("something nobody planned for")
+    monkeypatch.setattr(sm, "check_site", boom)                                                                                   # a crash the tool does not handle: the browser must still be closed
+    fake = Fake()
     with pytest.raises(RuntimeError):
         drive(["https://site.example/", "--retries", "0"], fake)
     assert fake.log[-1] == ("close",)
@@ -314,3 +315,48 @@ def test_every_page_in_the_list_exists_in_the_real_app_with_the_text_the_check_r
             c.exec_driver_sql(f"DROP DATABASE IF EXISTS {name} WITH (FORCE)")
             for r in build_demo.login_names(name):
                 c.exec_driver_sql(f"DROP ROLE IF EXISTS {r}")
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("", "nothing (the page was empty)"), ("   \n\t ", "nothing (the page was empty)"), ("Your app is in the oven", '"Your app is in the oven"'),
+    ("a\n\n  b\tc", '"a b c"'), ("pipe | char", '"pipe / char"'), ("x" * 160, '"' + "x" * 160 + '"'), ("x" * 161, '"' + "x" * 160 + '..."'), (None, '"None"')])
+def test_a_failure_report_quotes_what_the_page_showed_on_one_line_and_cuts_it_short(text, expected):
+    assert sm.snippet(text) == expected
+
+
+def test_the_report_says_what_a_restarting_host_showed_instead_of_the_site():
+    clock = Clock()
+    fake = Fake(home="Please wait while your app is being deployed", clock=clock)
+    out = sm.check_site(fake, "https://site.example/", TODAY, retries=0, pause=clock.pause, clock=clock.now)
+    md = sm.summary_markdown(out, "https://site.example/", TODAY)
+    assert '- SITE: the site did not load: no header after the wait; the page showed: "Please wait while your app is being deployed"' in md
+
+
+def test_a_site_that_is_slow_to_start_but_comes_up_within_two_minutes_passes():
+    clock = Clock()
+
+    class Starting(Fake):
+        def text(self):
+            return super().text() if clock.t >= 100 else "Your app is in the oven"                                               # shows the host's loading page for 100 seconds, then the real pages
+    out = sm.check_site(Starting(pages=good_pages(), clock=clock), "https://site.example/", TODAY, retries=0, pause=clock.pause, clock=clock.now)
+    assert out.ok and out.attempts == 1
+
+
+def test_a_site_the_browser_cannot_even_reach_is_a_failure_to_report_not_a_crash():
+    class Unreachable(Fake):
+        def open(self, url):
+            raise TimeoutError("Page.goto: Timeout 60000ms exceeded.\nCall log:\n  - navigating to the site")
+    clock = Clock()
+    out = sm.check_site(Unreachable(clock=clock), "https://site.example/", TODAY, retries=1, retry_wait=90, pause=clock.pause, clock=clock.now)
+    assert not out.ok and out.attempts == 2 and 90 in clock.pauses and out.pages == []                                          # still retried once, like any other failure
+    assert out.site_problems == ['could not open the site (TimeoutError: "Page.goto: Timeout 60000ms exceeded.")']
+    assert "- SITE: could not open the site (TimeoutError:" in sm.summary_markdown(out, "https://site.example/", TODAY)
+
+
+def test_waking_that_raises_is_handled_the_same_way_and_the_command_still_exits_one_with_a_report(capsys):
+    class BadWake(Fake):
+        def wake(self, timeout):
+            raise RuntimeError("the page closed")
+    assert drive(["https://site.example/", "--retries", "0"], BadWake(pages=good_pages())) == 1
+    out = capsys.readouterr().out
+    assert "**The site has a problem.**" in out and 'could not open the site (RuntimeError: "the page closed")' in out

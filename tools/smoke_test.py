@@ -39,8 +39,19 @@ EVERY_PAGE = ["UFC Fight Predictor", "Data and credits.", "Results through"]
 BROKEN = ("Couldn't load data", "Traceback (most recent call last)", "StreamlitAPIException", "Error running app", "Oh no.", "Something went wrong",
           "ModuleNotFoundError", "This app has gone to sleep")
 MAX_RESULTS_AGE_DAYS = 21
+FIRST_LOAD_TIMEOUT = 120.0          # a host that is restarting after a deploy can take a couple of minutes; a healthy site answers in seconds
+RETRY_WAIT = 90.0
+SNIPPET_CHARS = 160
 RESULTS_THROUGH = re.compile(r"Results through ([A-Z][a-z]{2}) (\d{1,2}), (\d{4})")
 MONTHS = {m: i for i, m in enumerate(["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"], 1)}
+
+
+def snippet(text: str, limit: int = SNIPPET_CHARS) -> str:
+    """What a page showed, for a person reading the report: one line, quoted, cut at `limit` characters ('nothing' when it was empty)."""
+    flat = " ".join(str(text).split())
+    if not flat:
+        return "nothing (the page was empty)"
+    return '"' + flat[:limit].replace("|", "/") + ('..."' if len(flat) > limit else '"')
 
 
 def has_all(text: str, markers) -> list[str]:
@@ -114,13 +125,19 @@ def poll_text(driver, markers, timeout: float, pause=time.sleep, clock=time.mono
         pause(step)
 
 
-def one_pass(driver, url: str, today: date, pages=PAGES, page_timeout: float = 45.0, wake_timeout: float = 150.0, pause=time.sleep, clock=time.monotonic) -> Outcome:
+def one_pass(driver, url: str, today: date, pages=PAGES, page_timeout: float = 45.0, wake_timeout: float = 150.0, first_load_timeout: float = FIRST_LOAD_TIMEOUT,
+             pause=time.sleep, clock=time.monotonic) -> Outcome:
     out = Outcome()
-    driver.open(url)
-    out.woke = bool(driver.wake(wake_timeout))
-    first = poll_text(driver, EVERY_PAGE[:1], wake_timeout if out.woke else page_timeout, pause, clock)
+    try:
+        driver.open(url)
+        out.woke = bool(driver.wake(wake_timeout))
+    except Exception as exc:                                    # the host is unreachable or the browser gave up: a failure to report, not a crash
+        out.site_problems.append(f"could not open the site ({type(exc).__name__}: {snippet(str(exc).splitlines()[0] if str(exc) else '', 120)})")
+        out.screenshot = "site"
+        return out
+    first = poll_text(driver, EVERY_PAGE[:1], wake_timeout if out.woke else first_load_timeout, pause, clock)
     if has_all(first, EVERY_PAGE[:1]):
-        out.site_problems.append("the site did not load: no header after the wait" + (" (it had to be woken)" if out.woke else ""))
+        out.site_problems.append("the site did not load: no header after the wait" + (" (it had to be woken)" if out.woke else "") + f"; the page showed: {snippet(first)}")
         out.site_problems += broken_signs(first, 0)
         out.screenshot = "site"
         return out
@@ -150,7 +167,7 @@ def one_pass(driver, url: str, today: date, pages=PAGES, page_timeout: float = 4
     return out
 
 
-def check_site(driver, url: str, today: date, retries: int = 1, retry_wait: float = 60.0, pause=time.sleep, clock=time.monotonic, **kw) -> Outcome:
+def check_site(driver, url: str, today: date, retries: int = 1, retry_wait: float = RETRY_WAIT, pause=time.sleep, clock=time.monotonic, **kw) -> Outcome:
     """A pass; if anything fails, wait and make up to `retries` more complete passes (a site that is just restarting is not an outage). The last pass is the result."""
     out = one_pass(driver, url, today, pause=pause, clock=clock, **kw)
     attempts = 1
@@ -244,7 +261,7 @@ def main(argv=None, driver_factory=None, today: date | None = None, pause=time.s
     ap.add_argument("url")
     ap.add_argument("--out", type=Path, default=None, help="a folder for the screenshot of a failing page")
     ap.add_argument("--retries", type=int, default=1)
-    ap.add_argument("--retry-wait", type=float, default=60.0)
+    ap.add_argument("--retry-wait", type=float, default=RETRY_WAIT)
     args = ap.parse_args(argv)
     if not args.url.startswith(("https://", "http://127.0.0.1", "http://localhost")):
         print("The site address must be https (or a local address for testing).")

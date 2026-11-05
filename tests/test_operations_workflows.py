@@ -139,6 +139,6 @@ def test_the_documentation_describes_each_check_and_what_to_set():
     runbook, readme = (ROOT / "docs" / "RUNBOOK.md").read_text(encoding="utf-8"), (ROOT / "README.md").read_text(encoding="utf-8")
     for needle in ("## Watching for silent failures", "**The live site check**", "**The watchdog**", "**The heartbeat**", "**The backup token's expiry**", "HEARTBEAT_URL", "BACKUP_HEARTBEAT_URL",
                    "DB_SIZE_LIMIT_MB", "SITE_URL", "github-authentication-token-expiration", "smoke-failure", "tests/test_smoke_checks.py", "tests/test_operations_workflows.py",
-                   "checks that pages WORK, not that their numbers are right", "I could not confirm"):
+                   "checks that pages WORK, not that their numbers are right", "I could not confirm", "**When the live site check fails.**", "failure.png"):
         assert needle in runbook, needle
     assert "**Silent failures.**" in readme and "smoke-test.yml" in readme and "five workflows" in readme
