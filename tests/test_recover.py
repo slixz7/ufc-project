@@ -176,7 +176,7 @@ def test_logins_that_already_exist_on_the_server_are_given_new_passwords_and_the
         with t["eng"].begin() as c:                                                                                         # as on a hosted project: the logins outlive the old database
             c.exec_driver_sql(f"CREATE ROLE {t['reader']} LOGIN PASSWORD 'OldReaderPw-1'")
             c.exec_driver_sql(f"CREATE ROLE {t['game']} LOGIN PASSWORD 'OldGamePw-1'")
-        assert go(t, world["data"], monkeypatch, tmp_path, "--skip-reasons") == 0
+        assert go(t, world["data"], monkeypatch, tmp_path, "--skip-reasons", "--replace-logins") == 0                        # the person has said they are sure nothing uses these logins
         site_url, game_url = (tmp_path / "site.txt").read_text().strip(), (tmp_path / "game.txt").read_text().strip()
         assert "OldReaderPw-1" not in site_url and "OldGamePw-1" not in game_url
         for url in (site_url, game_url):
@@ -231,15 +231,132 @@ def test_the_new_databases_address_comes_only_from_its_own_variable_never_from_d
 def test_the_other_ways_to_misuse_it_are_refused_before_anything_happens(tmp_path, capsys):
     assert recover.main([str(tmp_path / "nope")]) == 2 and "is not a folder" in capsys.readouterr().out
     assert recover.main([str(tmp_path), "--database-url", "postgresql://x/y"]) == 2 and "only for a rehearsal" in capsys.readouterr().out
+    (tmp_path / "MANIFEST.csv").write_text("")                                                                             # a folder that looks like a backup, so the checks that follow are reached
     assert recover.main([str(tmp_path), "--rehearse", "--database-url", conn("u", "p", "ep-cool-123." + "neon.tech", "db", "postgresql")]) == 2
     assert "hosted database" in capsys.readouterr().out                                                                   # refused before any connection is tried
 
 
 def test_an_unreachable_database_is_reported_without_its_password(tmp_path, monkeypatch, capsys):
+    (tmp_path / "MANIFEST.csv").write_text("")
     monkeypatch.setenv(recover.ENV_VAR, conn("someone", "SecretPw-1Ab", "127.0.0.1:1", "target", "postgresql"))
     assert recover.main([str(tmp_path), "--confirm", "target"]) == 2
     out = capsys.readouterr().out
     assert "Could not connect to 127.0.0.1/target" in out and "SecretPw-1Ab" not in out and "someone" not in out
+
+
+# ---------------------------------------------------------------------------------------------- a login that may still be in use
+@needs_postgres
+@pytest.mark.parametrize("which", ["reader", "game", "both"])
+def test_logins_that_already_exist_on_the_server_stop_the_real_run_before_anything_is_created(world, monkeypatch, tmp_path, capsys, which):
+    with empty_target() as t:
+        roles = {"reader": [t["reader"]], "game": [t["game"]], "both": [t["reader"], t["game"]]}[which]
+        with t["eng"].begin() as c:                                                                                         # as if this server also hosts the live site's logins
+            for r in roles:
+                c.exec_driver_sql(f"CREATE ROLE {r} LOGIN PASSWORD 'LivePw-{r}'")
+        assert go(t, world["data"], monkeypatch, tmp_path) == 2
+        out = capsys.readouterr().out
+        assert all(r in out for r in roles) and "NEW passwords" in out and "--replace-logins" in out and "brand-new database server or project" in out
+        assert not any(other in out for other in {t["reader"], t["game"]} - set(roles))                                      # it names only the logins that exist
+        assert sa.inspect(t["eng"]).get_table_names() == [] and not (tmp_path / "site.txt").exists() and not (tmp_path / "game.txt").exists()
+        for r in roles:                                                                                                      # and the live logins still work with their old passwords
+            live = sa.create_engine(sa.engine.make_url(t["url"]).set(username=r, password=f"LivePw-{r}"))
+            with live.connect() as c:
+                assert c.execute(sa.text("SELECT 1")).scalar() == 1
+            live.dispose()
+
+
+@needs_postgres
+def test_a_rehearsal_on_your_own_server_is_guarded_the_same_way_but_the_built_in_throwaway_server_is_not(world, monkeypatch, tmp_path, capsys):
+    with empty_target() as t:
+        with t["eng"].begin() as c:
+            c.exec_driver_sql(f"CREATE ROLE {t['reader']} LOGIN PASSWORD 'LivePw-1'")
+        roles = ["--reader-role", t["reader"], "--game-role", t["game"], "--skip-reasons"]
+        assert recover.main([str(world["data"]), "--rehearse", "--database-url", t["url"], *roles]) == 2
+        assert "already exist on this database server" in capsys.readouterr().out and sa.inspect(t["eng"]).get_table_names() == []
+        @contextmanager
+        def built_in():                                                                                                      # stands in for the built-in throwaway server, which is always fresh
+            yield t["eng"]
+        monkeypatch.setattr(recover.restore_drill, "scratch_database", built_in)
+        assert recover.main([str(world["data"]), "--rehearse", *roles]) == 0                                                  # no guard there: nothing real can live on it
+        assert "RECOVERY OK (a rehearsal: nothing was kept)" in capsys.readouterr().out
+
+
+@needs_postgres
+def test_it_reports_which_logins_exist_and_ignores_names_that_do_not(world):
+    with empty_target() as t:
+        assert recover.existing_logins(t["eng"], [t["reader"], t["game"]]) == []
+        with t["eng"].begin() as c:
+            c.exec_driver_sql(f"CREATE ROLE {t['game']} LOGIN PASSWORD 'x-Pw-2'")
+        assert recover.existing_logins(t["eng"], [t["reader"], t["game"], "no_such_login_anywhere"]) == [t["game"]]
+        recover.assert_logins_free(t["eng"], [t["reader"]], replace=False)                                                     # a login that does not exist is no obstacle
+        with pytest.raises(recover.Refusal):
+            recover.assert_logins_free(t["eng"], [t["reader"], t["game"]], replace=False)
+        recover.assert_logins_free(t["eng"], [t["reader"], t["game"]], replace=True)                                          # unless the person said to go ahead
+
+
+# ---------------------------------------------------------------------------------------------- the wrong folder
+def backup_folder(path: Path) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "MANIFEST.csv").write_text("table,rows,sha256,columns\n")
+    return path
+
+
+def test_a_folder_one_level_too_high_gets_a_hint_naming_the_right_one_and_nothing_is_started(tmp_path, capsys, monkeypatch):
+    def must_not_start(*a, **k):
+        raise AssertionError("a throwaway database was started although the folder was wrong")
+    monkeypatch.setattr(recover.restore_drill, "scratch_database", must_not_start)
+    outer = tmp_path / "ufc-project-backups-main"                                                                         # what Windows' Extract All makes: the folder inside the same-named folder
+    inner = backup_folder(outer / "ufc-project-backups-main" / "data")
+    assert recover.main([str(outer), "--rehearse", "--skip-reasons"]) == 2
+    out = capsys.readouterr().out
+    assert f"I do not see MANIFEST.csv in {outer}, but I do see it in {inner}." in out and "Did you mean that folder?" in out
+    assert f'Run the same command with:  "{inner}"' in out
+    assert "Rehearsing" not in out and "Recovering" not in out                                                             # nothing was started, not even the throwaway database
+
+
+def test_several_candidates_are_listed_and_none_is_guessed(tmp_path, capsys):
+    for name in ("one", "two"):
+        backup_folder(tmp_path / name / "data")
+    assert recover.main([str(tmp_path)]) == 2
+    out = capsys.readouterr().out
+    assert "in 2 folders inside it:" in out and str(tmp_path / "one" / "data") in out and str(tmp_path / "two" / "data") in out and "Give the one you mean" in out
+
+
+def test_a_folder_with_no_backup_anywhere_inside_says_so_plainly(tmp_path, capsys):
+    (tmp_path / "somewhere" / "else").mkdir(parents=True)
+    assert recover.main([str(tmp_path)]) == 2
+    assert f"{tmp_path} does not look like a backup: it has no MANIFEST.csv, and none in the folders inside it." in capsys.readouterr().out
+
+
+def test_a_zip_file_or_any_other_file_is_explained(tmp_path, capsys):
+    zipped = tmp_path / "ufc-project-backups-main.zip"
+    zipped.write_bytes(b"PK")
+    assert recover.main([str(zipped)]) == 2
+    assert "is a zip file. Extract it first (right-click, Extract All), then give the data folder inside it" in capsys.readouterr().out
+    other = tmp_path / "MANIFEST.csv"
+    other.write_text("x")
+    assert recover.main([str(other)]) == 2 and "is a file, not a folder." in capsys.readouterr().out
+
+
+def test_the_search_goes_three_levels_down_skips_hidden_folders_and_stops_at_five():
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        backup_folder(root / "a" / "b" / "c")                                                                              # three levels down: found
+        backup_folder(root / "p" / "q" / "r" / "s")                                                                        # four levels down: too deep
+        backup_folder(root / ".git" / "objects")                                                                           # a hidden folder: never searched
+        assert recover.find_backup(root) == [root / "a" / "b" / "c"]
+        for i in range(8):
+            backup_folder(root / f"z{i}" / "data")
+        found = recover.find_backup(root)
+        assert len(found) == 5 and all(p.name in ("c", "data") for p in found)                                              # it stops at five, however many more there are
+
+
+def test_a_folder_that_holds_the_manifest_passes_the_check_and_moves_on(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv(recover.ENV_VAR, raising=False)
+    assert recover.main([str(backup_folder(tmp_path / "data"))]) == 2
+    out = capsys.readouterr().out
+    assert recover.ENV_VAR in out and "MANIFEST" not in out                                                                 # it got past the folder check to the next one
 
 
 # ---------------------------------------------------------------------------------------------- failures part-way
@@ -349,5 +466,5 @@ def test_the_tool_cannot_read_database_url_as_an_input_and_never_prints_a_connec
 def test_the_runbook_describes_the_recovery_and_the_counter_fix():
     runbook = (ROOT / "docs" / "RUNBOOK.md").read_text(encoding="utf-8")
     for needle in ("## One-command recovery", "python pipeline/recover.py", "RECOVER_DATABASE_URL", "--confirm", "--rehearse", "never reads DATABASE_URL", "tests/test_recover.py",
-                   "auto-number counter", "fix_sequences", "check_sequences", "GAME_DATABASE_URL"):
+                   "auto-number counter", "fix_sequences", "check_sequences", "GAME_DATABASE_URL", "--replace-logins", "Logins belong to the server", "Did you mean that folder?"):
         assert needle in runbook, needle

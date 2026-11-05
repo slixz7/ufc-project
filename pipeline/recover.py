@@ -9,6 +9,11 @@ Neon database) and reads its connection string, the owner's, from the environmen
 forgot was still set) cannot be touched by mistake; and it refuses any database that is not empty, so it can never overwrite anything. `--confirm` must repeat the database's own
 name, as a second pair of eyes (the command says what to type). Nothing it prints contains a password or a connection string.
 
+Two more protections. LOGINS BELONG TO THE DATABASE SERVER, not to one database: recovering into a new database on a server that already has the website's or the game's login would give
+them NEW passwords and cut off whatever still uses the old ones (the live site, if the same server hosts it). So the tool stops, before creating anything, if either login already exists
+on the server, unless you add --replace-logins to say you are sure nothing uses them any more. And if the folder you give it has no MANIFEST.csv, it looks inside it and says where it
+found one (an extracted zip is usually nested one level deeper than you expect), rather than guessing.
+
 What it does, in order (the first part is the weekly restore drill's recipe, `restore_drill.run_drill`, which is tested row for row; this adds what the drill must not do):
   1. checks every backup file against MANIFEST.csv: a damaged or incomplete backup stops everything here, before anything is created;
   2. creates every table with the project's own setup steps and restores each one, then compares every table with the backup (rows, and filled-in cells per column);
@@ -34,6 +39,7 @@ from pathlib import Path
 
 import sqlalchemy as sa
 
+import backup
 import db_roles
 import game_admin
 import restore_drill
@@ -79,6 +85,56 @@ def assert_target(engine, confirm: str | None, rehearsal: bool) -> None:
                       "overwrite anything. Create a new empty database and point RECOVER_DATABASE_URL at it.")
     if not rehearsal and confirm != engine.url.database:
         raise Refusal(f"This will restore into {describe(engine)}. To go ahead, run the same command again with:  --confirm {engine.url.database}")
+
+
+def existing_logins(engine, names) -> list[str]:
+    """Which of these logins already exist on the database SERVER (logins are shared by every database on it)."""
+    with engine.connect() as conn:
+        rows = conn.execute(sa.text("SELECT rolname FROM pg_roles WHERE rolname = ANY(:n)"), {"n": list(names)}).fetchall()
+    return sorted(r[0] for r in rows)
+
+
+def assert_logins_free(engine, names, replace: bool) -> None:
+    """Refuse, before anything is created, if recovering here would change the password of a login that may still be in use."""
+    found = existing_logins(engine, names)
+    if found and not replace:
+        raise Refusal(f"the login(s) {', '.join(found)} already exist on this database server. Logins belong to the server, not to one database, so recovering here would give "
+                      "them NEW passwords and cut off whatever still uses the old ones (if this server also hosts your live site or game, they would stop working until their secrets "
+                      "were changed). Use a brand-new database server or project, where nothing exists yet. Only if you are sure nothing uses these logins any more (the old "
+                      "database is gone), run the same command again with --replace-logins.")
+
+
+def find_backup(directory: Path, depth: int = 3, limit: int = 5) -> list[Path]:
+    """Folders inside `directory` (a few levels down) that hold MANIFEST.csv: where an extracted zip's backup usually is when the folder given was one level too high."""
+    found = []
+    for root, dirs, files in os.walk(directory):
+        here = Path(root)
+        if backup.MANIFEST in files and here != Path(directory):
+            found.append(here)
+        if len(here.relative_to(directory).parts) >= depth:
+            dirs[:] = []
+        dirs[:] = sorted(d for d in dirs if not d.startswith("."))
+        if len(found) >= limit:
+            break
+    return found
+
+
+def folder_problem(directory: Path) -> str | None:
+    """None when this is a backup folder; otherwise what is wrong and, if possible, which folder was probably meant."""
+    if directory.is_file():
+        what = "is a zip file. Extract it first (right-click, Extract All)," if directory.suffix.lower() == ".zip" else "is a file, not a folder."
+        return f"{directory} {what} then give the data folder inside it (the one that contains {backup.MANIFEST})."
+    if not directory.is_dir():
+        return f"{directory} is not a folder. Give the backup's data folder (the one that contains {backup.MANIFEST})."
+    if (directory / backup.MANIFEST).exists():
+        return None
+    nearby = find_backup(directory)
+    if len(nearby) == 1:
+        return f"I do not see {backup.MANIFEST} in {directory}, but I do see it in {nearby[0]}.\nDid you mean that folder? Run the same command with:  \"{nearby[0]}\""
+    if nearby:
+        return (f"I do not see {backup.MANIFEST} in {directory}, but I do see it in {len(nearby)} folders inside it:\n" + "\n".join(f"  {p}" for p in nearby[:3])
+                + "\nGive the one you mean (the newest backup).")
+    return f"{directory} does not look like a backup: it has no {backup.MANIFEST}, and none in the folders inside it. Give the backup's data folder."
 
 
 # ----------------------------------------------------------------------------------------------
@@ -189,16 +245,21 @@ def main(argv=None) -> int:
     ap.add_argument("--database-url", help="(with --rehearse) your own EMPTY local Postgres instead of the built-in one; hosted databases are refused")
     ap.add_argument("--confirm", help="the new database's name, typed again, to confirm the real run")
     ap.add_argument("--skip-reasons", action="store_true", help="do not rebuild the 'Why this pick?' cache now")
+    ap.add_argument("--replace-logins", action="store_true", help="give new passwords to the website's and the game's logins even though they already exist on this server (only if nothing uses them any more)")
     ap.add_argument("--site-file", type=Path, default=db_roles.URL_FILE, help="where the website's new connection string is written")
     ap.add_argument("--game-file", type=Path, default=game_admin.URL_FILE, help="where the game's new connection string is written")
     ap.add_argument("--reader-role", default=db_roles.READER_ROLE, help=argparse.SUPPRESS)
     ap.add_argument("--game-role", default=game_admin.DEFAULT_ROLE, help=argparse.SUPPRESS)
     args = ap.parse_args(argv)
-    if not args.directory.is_dir():
-        print(f"{args.directory} is not a folder. Give the backup's data folder (the one that contains MANIFEST.csv).")
+    if not args.directory.exists() or args.directory.is_file():
+        print(folder_problem(args.directory))
         return 2
     if args.database_url and not args.rehearse:
         print("--database-url is only for a rehearsal. The real run reads the new database from the environment variable " + ENV_VAR + ".")
+        return 2
+    problem = folder_problem(args.directory)
+    if problem:
+        print(problem)
         return 2
     scratch = None
     engine = None
@@ -211,11 +272,14 @@ def main(argv=None) -> int:
                 scratch = restore_drill.scratch_database()
                 engine = scratch.__enter__()
             assert_target(engine, None, rehearsal=True)
+            if scratch is None:                                                                  # the built-in throwaway server is fresh; any other server may have real logins
+                assert_logins_free(engine, (args.reader_role, args.game_role), args.replace_logins)
             keep = tempfile.TemporaryDirectory(prefix="ufc-rehearsal-")
             site_file, game_file = Path(keep.name) / "site.txt", Path(keep.name) / "game.txt"
         else:
             engine = target_from_environment()
             assert_target(engine, args.confirm, rehearsal=False)
+            assert_logins_free(engine, (args.reader_role, args.game_role), args.replace_logins)
             keep, site_file, game_file = None, args.site_file, args.game_file
         print(f"{'Rehearsing into' if args.rehearse else 'Recovering into'} {describe(engine)}, from {args.directory}")
         result = run_recovery(args.directory, engine, site_file=site_file, game_file=game_file, reasons=not args.skip_reasons,
