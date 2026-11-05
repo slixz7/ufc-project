@@ -407,6 +407,69 @@ def test_the_insights_page_still_opens_when_a_deployment_has_no_market_informed_
 
 @needs_postgres
 @needs_streamlit
+def test_the_upcoming_cards_show_the_distance_breakdown_beside_the_distance_line(tiny_demo):
+    with _app(tiny_demo) as at:
+        page = html.unescape(_plain(at))
+        assert not at.exception and not at.error
+        assert page.count("Why this distance prediction?") >= 5, page[:400]                                                # a panel on every card that has a distance line
+        assert "Average fight" in page and "This fight, model only" in page and "What moves the model-only estimate" in page
+        assert "Earlier fights that went to a decision:" in page and "Goes the distance" in page
+        assert "Why this pick?" in page                                                                                      # the winner panel is still there beside it
+
+
+@needs_postgres
+@needs_streamlit
+def test_with_the_betting_line_the_panel_adds_the_comparison_in_words(small_demo):
+    with _app(small_demo) as at:
+        page = html.unescape(_plain(at))
+        assert not at.exception and not at.error
+        assert "With the betting line" in page and "The betting line makes the favourite" in page and "the second stage re-weighting the model-only number" in page
+        assert not re.search(r"decimal odds|american odds|moneyline", page, flags=re.I)                                    # the site still never shows odds
+
+
+@needs_postgres
+@needs_streamlit
+def test_a_breakdown_that_disagrees_with_the_number_on_the_card_is_hidden_and_the_card_keeps_its_prediction(tiny_demo):
+    owner = sa.create_engine(tiny_demo["owner_url"].replace("postgresql://", "postgresql+psycopg2://", 1))
+    originals = pd.read_sql(sa.text("SELECT bout_id, p_distance FROM upcoming_distance_v1 WHERE status = 'locked'"), owner)
+    assert len(originals) >= 5
+    try:
+        with owner.begin() as c:
+            c.exec_driver_sql("UPDATE upcoming_distance_v1 SET p_distance = CASE WHEN p_distance > 0.5 THEN p_distance - 0.07 ELSE p_distance + 0.07 END WHERE status = 'locked'")
+        with _app(tiny_demo) as at:
+            page = html.unescape(_plain(at))
+            assert not at.exception and not at.error
+            assert "Why this distance prediction?" not in page                                                              # no explanation beside a number it does not explain
+            assert "goes the distance" in page.lower() and "Why this pick?" in page                                         # the card and the winner panel are untouched
+    finally:
+        with owner.begin() as c:
+            for r in originals.itertuples():
+                c.execute(sa.text("UPDATE upcoming_distance_v1 SET p_distance = :p WHERE bout_id = :b"), {"p": r.p_distance, "b": r.bout_id})
+    with _app(tiny_demo) as at:
+        assert "Why this distance prediction?" in html.unescape(_plain(at))                                                # and it comes back when the numbers agree again
+
+
+@needs_postgres
+@needs_streamlit
+def test_a_damaged_betting_line_comparison_is_dropped_and_the_rest_of_the_panel_stays(small_demo):
+    owner = sa.create_engine(small_demo["owner_url"].replace("postgresql://", "postgresql+psycopg2://", 1))
+    originals = pd.read_sql(sa.text("SELECT bout_id, p_distance FROM upcoming_distance_v2 WHERE status = 'locked'"), owner)
+    assert len(originals) >= 5                                                                                              # the small demo has market-informed distance predictions
+    try:
+        with owner.begin() as c:
+            c.exec_driver_sql("UPDATE upcoming_distance_v2 SET p_distance = CASE WHEN p_distance > 0.5 THEN p_distance - 0.07 ELSE p_distance + 0.07 END WHERE status = 'locked'")
+        with _app(small_demo) as at:
+            page = html.unescape(_plain(at))
+            assert not at.exception and "Why this distance prediction?" in page and "What moves the model-only estimate" in page
+            assert "The betting line makes the favourite" not in page and "With the betting line" not in page                  # only the comparison that disagreed is left out
+    finally:
+        with owner.begin() as c:
+            for r in originals.itertuples():
+                c.execute(sa.text("UPDATE upcoming_distance_v2 SET p_distance = :p WHERE bout_id = :b"), {"p": r.p_distance, "b": r.bout_id})
+
+
+@needs_postgres
+@needs_streamlit
 def test_the_evidence_meter_still_renders_when_the_live_picks_table_is_missing(tiny_demo):
     owner = sa.create_engine(tiny_demo["owner_url"].replace("postgresql://", "postgresql+psycopg2://", 1))
     with owner.begin() as c:

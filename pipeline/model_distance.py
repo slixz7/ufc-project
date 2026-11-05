@@ -14,6 +14,7 @@ Honest test (see `scoring`): trained and scored year by year, it beat the plain 
     python pipeline/model_distance.py predict [--today D]   # lock a prediction for every newly announced upcoming bout
     python pipeline/model_distance.py grade                 # after the results are in the dataset
     python pipeline/model_distance.py scoring               # the report: log loss, calibration, year by year
+    python pipeline/model_distance.py explain-upcoming      # store the "Why this prediction?" breakdown for every locked upcoming bout that has none (predict does this too)
 
 Scheduled rounds of upcoming bouts are not on the cards, so a title fight or main event is taken to be five rounds and anything else
 three (since 2002, 84% of the fights the source flags as "title" had five rounds, the rest being tournament finals such as The Ultimate Fighter and
@@ -34,6 +35,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
+import distance_reasons as dr
 import distance_scores
 import model_v2 as v2
 import upcoming
@@ -205,7 +207,7 @@ def scheduled_rounds(title_fight, bout_order) -> int:
     return 5 if (bool(title_fight) or (pd.notna(bout_order) and int(bout_order) == 1)) else 3
 
 
-def run_predict(engine, today: date) -> int:
+def _lock_predictions(engine, today: date) -> int:
     ensure_tables(engine)
     with engine.begin() as conn:      # keep cancelled and reinstated bouts in step with the card
         conn.execute(sa.text("""UPDATE upcoming_distance_v1 SET status = CASE WHEN bout_id IN (SELECT bout_id FROM upcoming_fights WHERE status = 'cancelled')
@@ -240,6 +242,74 @@ def run_predict(engine, today: date) -> int:
     for r in rows.itertuples():
         print(f"  {r.event_date}  {r.fighter_a:24s} vs {r.fighter_b:24s} -> {r.p_distance:.0%} goes the distance ({r.scheduled_rounds} rounds, base rate {r.p_base:.0%})")
     return 0
+
+
+def run_predict(engine, today: date) -> int:
+    """Lock a prediction for every newly announced bout, then store the plain-language breakdown for every locked bout that lacks one."""
+    rc = _lock_predictions(engine, today)
+    if rc == 0:
+        _explain_quietly(engine)
+    return rc
+
+
+# ----------------------------------------------------------------------------------------------
+# "Why this prediction?": the breakdown of each locked prediction, stored beside the winner picks' reasons (pick_reasons, version 'd1')
+# ----------------------------------------------------------------------------------------------
+def explain_missing(engine) -> tuple[int, int]:
+    """Store the breakdown for every locked, not yet graded prediction that has none. (stored, skipped).
+
+    The model is rebuilt exactly as it was when the prediction was locked: it learned from the first `trained_on_fights` eligible fights in date order, and a fight's inputs never
+    use a later fight, so the same fights give the same model. The rebuilt model must reproduce the LOCKED probability (to a millionth); if it does not (the history was revised
+    since), nothing is stored for that bout, so an explanation can never disagree with the number it sits beside."""
+    ensure_tables(engine)
+    with engine.begin() as conn:
+        conn.execute(sa.text(v2.REASONS_DDL))
+    missing = pd.read_sql(sa.text("""SELECT d.bout_id, d.p_distance, d.scheduled_rounds, d.trained_on_fights FROM upcoming_distance_v1 d
+                                     LEFT JOIN pick_reasons r ON r.bout_id = d.bout_id AND r.version = 'd1'
+                                     WHERE d.status = 'locked' AND d.graded_at IS NULL AND r.bout_id IS NULL AND d.trained_on_fights IS NOT NULL"""), engine)
+    if missing.empty:
+        return 0, 0
+    history = load_history(engine)
+    D = frame(history, v2.placeholders(engine, history, only_ids=set(missing.bout_id)))
+    E = eligible(D).sort_values(["event_date", "fight_url"], kind="mergesort")
+    up = D[D.is_up].copy()
+    up["bout_id"] = up.fight_url.str.replace("upcoming:", "", regex=False)
+    up = up.set_index("bout_id", drop=False)
+    stored = skipped = 0
+    for n_train, grp in missing.groupby("trained_on_fights"):
+        grp = grp.set_index("bout_id")
+        have = [b for b in grp.index if b in up.index]
+        skipped += len(grp) - len(have)
+        train = E.iloc[: int(n_train)]
+        if not have or len(train) != int(n_train) or len(train) < MIN_TRAIN:
+            skipped += len(have)
+            log.warning("Cannot rebuild the model that was trained on %d fights (%d available): no breakdown stored for %d bout(s).", int(n_train), len(train), len(have))
+            continue
+        model, mu = fit(train)
+        rows = up.loc[have].copy()
+        rows["five"] = (grp.scheduled_rounds.reindex(have) == 5).astype(int).to_numpy()
+        X = design(rows, mu)
+        p = model.predict_proba(X)[:, 1]
+        C, intercept, Z = dr.contributions(model, X)
+        items = []
+        for i, bout in enumerate(have):
+            if abs(p[i] - float(grp.p_distance[bout])) > dr.TOLERANCE:
+                skipped += 1
+                log.warning("The rebuilt model gives %.4f for %s but %.4f was locked: no breakdown stored.", p[i], bout, float(grp.p_distance[bout]))
+                continue
+            items.append((bout, dr.build_v1(rows.iloc[i], C.iloc[i], Z.iloc[i], intercept, rows.name_a.iloc[i], rows.name_b.iloc[i])))
+        stored += v2.save_reasons(engine, "d1", items)
+    return stored, skipped
+
+
+def _explain_quietly(engine) -> None:
+    """A breakdown is never worth failing the run for: whatever goes wrong is logged and the predictions stand."""
+    try:
+        stored, skipped = explain_missing(engine)
+        if stored or skipped:
+            log.info("Why-this-prediction breakdowns: %d stored, %d skipped (they did not reproduce the locked number).", stored, skipped)
+    except Exception as exc:
+        log.warning("Could not store the why-this-prediction breakdowns: %s: %s", type(exc).__name__, exc)
 
 
 # ----------------------------------------------------------------------------------------------
@@ -333,7 +403,7 @@ def main(argv=None) -> int:
     bt.add_argument("--rebuild", action="store_true", help="score every fight again from scratch")
     pr = sub.add_parser("predict")
     pr.add_argument("--today", help="(testing only) pretend today is YYYY-MM-DD")
-    for name in ("setup", "grade", "scoring"):
+    for name in ("setup", "grade", "scoring", "explain-upcoming"):
         sub.add_parser(name)
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -348,6 +418,10 @@ def main(argv=None) -> int:
         return run_predict(engine, date.fromisoformat(args.today) if args.today else date.today())
     if args.command == "grade":
         return run_grade(engine)
+    if args.command == "explain-upcoming":
+        stored, skipped = explain_missing(engine)
+        log.info("Stored %d breakdown(s); %d skipped.", stored, skipped)
+        return 0
     return cmd_scoring(engine)
 
 

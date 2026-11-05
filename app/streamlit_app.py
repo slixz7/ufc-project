@@ -32,6 +32,7 @@ import model_health  # noqa: E402
 from distance_ui import line_html as dist_line_html, section_html as dist_section_html, section_v2_html as dist_section_v2_html  # noqa: E402
 import game_ui  # noqa: E402
 import credits_ui  # noqa: E402
+import distance_why_ui  # noqa: E402
 import evidence  # noqa: E402
 import evidence_ui  # noqa: E402
 import insights_ui  # noqa: E402
@@ -495,6 +496,23 @@ def dist_html(r) -> str:
         return ""                         # a prediction line must never break the page
 
 
+def dist_why_html(r) -> str:
+    """'Why this distance prediction?' beside the distance line: only for a bout whose line is shown, and only where the stored breakdown agrees with the number on the card."""
+    try:
+        bout = getattr(r, "bout_id", None)
+        x, rs = DISTANCE.get(bout), REASONS.get(bout) or {}
+        if not x or not rs.get("d1"):
+            return ""
+        d1, d2 = rs["d1"], rs.get("d2")
+        if abs(float(d1["p"]) - x[0]) > 0.005:                      # a breakdown that disagrees with the card's number is hidden, never shown
+            return ""
+        if d2 and (len(x) < 4 or x[3] is None or abs(float(d2["p_v2"]) - x[3]) > 0.005):
+            d2 = None                                              # likewise the comparison with the betting line
+        return distance_why_ui.why_html(d1, d2)
+    except Exception:
+        return ""                         # an explanation must never break the page
+
+
 def has_fight_reasons() -> bool:
     try:
         return bool(q("SELECT to_regclass('public.fight_reasons') IS NOT NULL AS ok").ok.iloc[0])
@@ -613,7 +631,7 @@ def main_event_html(r, rec: dict) -> str:
             f'<div class="duel">{side_html(r.fighter_a, rec.get(r.fighter_a_url, "UFC debut"), "a", pa)}<div class="vs">vs.</div>'
             f'{side_html(r.fighter_b, rec.get(r.fighter_b_url, "UFC debut"), "b", pb)}</div>'
             f'<div style="margin-top:20px">{scale}</div><div class="verdict">{verdict}</div>'
-            f'{dist_html(r)}{why_html(r, True)}{tape_details(pd.Series(r._asdict()), r.fighter_a, r.fighter_b, open_=True)}</div>')
+            f'{dist_html(r)}{dist_why_html(r)}{why_html(r, True)}{tape_details(pd.Series(r._asdict()), r.fighter_a, r.fighter_b, open_=True)}</div>')
 
 
 def bout_html(r, rec: dict) -> str:
@@ -624,7 +642,7 @@ def bout_html(r, rec: dict) -> str:
             f'<div class="duel">{side_html(r.fighter_a, rec.get(r.fighter_a_url, "UFC debut"), "a", pa)}<div class="vs">vs.</div>'
             f'{side_html(r.fighter_b, rec.get(r.fighter_b_url, "UFC debut"), "b", pb)}</div>'
             f'<div style="margin-top:14px">{scale}</div><div class="verdict">{verdict}</div>'
-            f'{dist_html(r)}{why_html(r)}{tape_details(pd.Series(r._asdict()), r.fighter_a, r.fighter_b)}</div>')
+            f'{dist_html(r)}{dist_why_html(r)}{why_html(r)}{tape_details(pd.Series(r._asdict()), r.fighter_a, r.fighter_b)}</div>')
 
 
 def prow_html(r, rec: dict) -> str:
@@ -642,7 +660,7 @@ def prow_html(r, rec: dict) -> str:
             f'{side_html(r.fighter_a, rec.get(r.fighter_a_url, "UFC debut"), "a", pa)}'
             f'<div class="mid"><div class="label" style="justify-content:center;margin:0 0 6px">{div}</div>{scale}{small}</div>'
             f'{side_html(r.fighter_b, rec.get(r.fighter_b_url, "UFC debut"), "b", pb)}</div>'
-            f'{dist_html(r)}{why_html(r)}{tape_details(pd.Series(r._asdict()), r.fighter_a, r.fighter_b)}</div>')
+            f'{dist_html(r)}{dist_why_html(r)}{why_html(r)}{tape_details(pd.Series(r._asdict()), r.fighter_a, r.fighter_b)}</div>')
 
 
 def page_upcoming():

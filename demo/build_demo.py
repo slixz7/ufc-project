@@ -49,7 +49,7 @@ import synth  # noqa: E402
 import upcoming  # noqa: E402
 
 INVITE_CODE = "demo"
-BUILD_VERSION = "4"             # bump when a change means a demo built by older code should be rebuilt (the launcher compares it); 2 = the market-informed distance model, 3 = the real base-table layout, 4 = reach in whole inches like the real column
+BUILD_VERSION = "5"             # bump when a change means a demo built by older code should be rebuilt (the launcher compares it); 2 = the market-informed distance model, 3 = the real base-table layout, 4 = reach in whole inches like the real column, 5 = the distance predictions' stored breakdowns
 # Database logins belong to the whole Postgres SERVER, not to one database. The demo therefore uses logins of its own, named after its database, so that
 # building a demo on a server that also holds a real project can never change the real `site_reader` or `game_app`, and two demos cannot break each other.
 READER_PREFIX, GAME_PREFIX = "demo_site_", "demo_game_"

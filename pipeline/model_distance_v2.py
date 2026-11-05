@@ -19,6 +19,7 @@ It is a market-informed prediction in the same sense as the winner model v3, and
     python pipeline/model_distance_v2.py predict [--today D] [--within-days N] [--dry-run]   # lock v2 for bouts that have a v1 prediction and a line
     python pipeline/model_distance_v2.py grade                          # after the results are in the dataset
     python pipeline/model_distance_v2.py scoring                        # the report, against v1 on the same fights
+    python pipeline/model_distance_v2.py explain-upcoming               # store the "Why this prediction?" comparison for every locked upcoming bout that has none (predict does this too)
 
 A v2 prediction is locked once, with the latest line at that moment, and never changes. If v1 is rebuilt from scratch, rebuild v2 too.
 """
@@ -36,6 +37,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
+import distance_reasons as dr
 import distance_scores
 import model_distance as v1
 import model_v2 as v2
@@ -145,7 +147,7 @@ def run_backtest(engine, rebuild: bool = False) -> int:
 # ----------------------------------------------------------------------------------------------
 # predictions for announced bouts
 # ----------------------------------------------------------------------------------------------
-def run_predict(engine, today: date, within_days: int | None = None, dry_run: bool = False) -> int:
+def _lock_predictions(engine, today: date, within_days: int | None = None, dry_run: bool = False) -> int:
     ensure_tables(engine)
     with engine.begin() as conn:      # keep cancelled and reinstated bouts in step with the card
         conn.execute(sa.text(f"""UPDATE {TABLE_UP} SET status = CASE WHEN bout_id IN (SELECT bout_id FROM upcoming_fights WHERE status = 'cancelled')
@@ -200,6 +202,63 @@ def run_predict(engine, today: date, within_days: int | None = None, dry_run: bo
     for r in R.itertuples():
         print(f"  {r.event_date}  {r.fighter_a:24s} vs {r.fighter_b:24s} -> {r.p_distance:.0%} goes the distance (model-only said {r.p_v1:.0%}, favourite {r.fav_prob:.0%})")
     return 0
+
+
+def run_predict(engine, today: date, within_days: int | None = None, dry_run: bool = False) -> int:
+    """Lock the market-informed prediction for every bout that has a line, then store the comparison for every locked bout that lacks one. A dry run writes nothing."""
+    rc = _lock_predictions(engine, today, within_days, dry_run)
+    if rc == 0 and not dry_run:
+        _explain_quietly(engine)
+    return rc
+
+
+# ----------------------------------------------------------------------------------------------
+# "Why this prediction?": what the line did to the model-only prediction, stored in pick_reasons (version 'd2')
+# ----------------------------------------------------------------------------------------------
+def explain_missing(engine) -> tuple[int, int]:
+    """Store the comparison for every locked, not yet graded prediction that has none. (stored, skipped).
+
+    The second stage is rebuilt as it was when locked (it learned from the first `trained_on_fights` fights of the training table, oldest first) and must reproduce the LOCKED
+    probability to a millionth; otherwise nothing is stored for that bout, so the page can never show a comparison that disagrees with the number beside it."""
+    ensure_tables(engine)
+    with engine.begin() as conn:
+        conn.execute(sa.text(v2.REASONS_DDL))
+    missing = pd.read_sql(sa.text(f"""SELECT u.bout_id, u.fighter_a, u.fighter_b, u.p_v1, u.fav_prob, u.p_distance, u.trained_on_fights FROM {TABLE_UP} u
+                                      LEFT JOIN pick_reasons r ON r.bout_id = u.bout_id AND r.version = 'd2'
+                                      WHERE u.status = 'locked' AND u.graded_at IS NULL AND r.bout_id IS NULL AND u.trained_on_fights IS NOT NULL"""), engine)
+    if missing.empty:
+        return 0, 0
+    T = training_table(engine)
+    stored = skipped = 0
+    for n_train, grp in missing.groupby("trained_on_fights"):
+        tr = T.iloc[: int(n_train)]
+        if len(tr) != int(n_train) or len(tr) < MIN_TRAIN:
+            skipped += len(grp)
+            log.warning("Cannot rebuild the second stage that learned from %d fights (%d available): no comparison stored for %d bout(s).", int(n_train), len(tr), len(grp))
+            continue
+        stacker = fit_stacker(tr)
+        p = stack_predict(stacker, grp.p_v1.values, grp.fav_prob.values)
+        typical = 0.5 + float(stacker[0].mean_[1])                                   # the favourite strength of a typical fight in the training data
+        p_typical = stack_predict(stacker, grp.p_v1.values, np.full(len(grp), typical))
+        items = []
+        for i, r in enumerate(grp.itertuples()):
+            if abs(p[i] - float(r.p_distance)) > dr.TOLERANCE:
+                skipped += 1
+                log.warning("The rebuilt second stage gives %.4f for %s but %.4f was locked: no comparison stored.", p[i], r.bout_id, float(r.p_distance))
+                continue
+            items.append((r.bout_id, dr.build_v2(r.fighter_a, r.fighter_b, r.p_v1, r.fav_prob, r.p_distance, typical, p_typical[i])))
+        stored += v2.save_reasons(engine, "d2", items)
+    return stored, skipped
+
+
+def _explain_quietly(engine) -> None:
+    """A comparison is never worth failing the run for: whatever goes wrong is logged and the predictions stand."""
+    try:
+        stored, skipped = explain_missing(engine)
+        if stored or skipped:
+            log.info("Why-this-prediction comparisons: %d stored, %d skipped (they did not reproduce the locked number).", stored, skipped)
+    except Exception as exc:
+        log.warning("Could not store the why-this-prediction comparisons: %s: %s", type(exc).__name__, exc)
 
 
 # ----------------------------------------------------------------------------------------------
@@ -267,7 +326,7 @@ def main(argv=None) -> int:
     pr.add_argument("--today", help="(testing only) pretend today is YYYY-MM-DD")
     pr.add_argument("--within-days", type=int, default=None, help="only lock bouts whose event is at most this many days away")
     pr.add_argument("--dry-run", action="store_true", help="show what would be locked; write nothing")
-    for name in ("setup", "grade", "scoring"):
+    for name in ("setup", "grade", "scoring", "explain-upcoming"):
         sub.add_parser(name)
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -282,6 +341,10 @@ def main(argv=None) -> int:
         return run_predict(engine, date.fromisoformat(args.today) if args.today else date.today(), args.within_days, args.dry_run)
     if args.command == "grade":
         return run_grade(engine)
+    if args.command == "explain-upcoming":
+        stored, skipped = explain_missing(engine)
+        log.info("Stored %d comparison(s); %d skipped.", stored, skipped)
+        return 0
     return cmd_scoring(engine)
 
 
