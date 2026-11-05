@@ -102,7 +102,7 @@ def test_the_job_that_can_write_installs_nothing_and_runs_only_this_repositorys_
     for forbidden in ("pip3", "setup-python", "npm ", "venv", "apt-get", "curl", "wget"):
         assert forbidden not in block, forbidden
     assert "python3 tools/refresh_lock.py publish" in block                                                                # the repository's own script, standard library only
-    assert block.count("uses: ") == 2 and "actions/checkout@v4" in block and "actions/download-artifact@v4" in block      # nothing but checkout and the artifact
+    assert block.count("uses: ") == 2 and re.search(r"actions/checkout@v\d+", block) and re.search(r"actions/download-artifact@v\d+", block)      # nothing but checkout and the artifact
 
 
 def test_the_publishing_job_treats_the_artifact_as_data_and_proves_only_one_file_changed():
@@ -151,7 +151,8 @@ def test_every_action_is_pinned_to_a_major_version_and_matches_the_tests_workflo
     assert uses and all(re.fullmatch(r"[\w.-]+/[\w.-]+@v\d+", u) for u in uses), uses
     for action in ("actions/checkout", "actions/setup-python"):
         assert re.search(rf"{action}@v\d+", TEXT).group(0) == re.search(rf"{action}@v\d+", TESTS_YML).group(0)           # the same major versions the rest of the project uses
-    assert "actions/upload-artifact@v4" in TEXT and "actions/download-artifact@v4" in TEXT                                 # a matching pair: v4 artifacts only work with v4
+    up, down = re.search(r"actions/upload-artifact@v(\d+)", TEXT), re.search(r"actions/download-artifact@v(\d+)", TEXT)
+    assert up and down and up.group(1) == down.group(1)                                 # a matching pair: v4 artifacts only work with v4
 
 
 def test_the_other_workflows_still_install_through_the_lock_and_this_one_is_the_only_deliberate_exception():

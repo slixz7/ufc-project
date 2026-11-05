@@ -76,7 +76,7 @@ def test_it_waits_for_the_host_only_after_a_push_and_keeps_a_screenshot_only_whe
     wait = step(check, "Give the host time to redeploy")
     assert "if: ${{ github.event_name == 'workflow_run' }}" in wait and "run: sleep 240" in wait
     keep = step(check, "Keep the screenshots of a failing page")
-    assert "if: failure()" in keep and "actions/upload-artifact@v4" in keep and "name: smoke-failure" in keep and "retention-days: 7" in keep and "path: smoke_out" in keep
+    assert "if: failure()" in keep and re.search(r"actions/upload-artifact@v\d+", keep) and "name: smoke-failure" in keep and "retention-days: 7" in keep and "path: smoke_out" in keep
 
 
 def test_the_alert_is_its_own_job_with_the_only_secret_in_the_file():

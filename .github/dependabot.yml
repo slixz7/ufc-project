@@ -1,6 +1,7 @@
-# Weekly check for newer versions of the GitHub Actions the workflows use (checkout, setup-python). A new version arrives as a pull request, and the
-# Tests workflow runs on it, so nothing changes until a green check says it is safe. The Python packages are locked in constraints-ci.txt and
-# refreshed by hand, after the whole suite has passed on the new versions.
+# Weekly check for newer versions of the GitHub Actions the workflows use (checkout, setup-python, upload-artifact, download-artifact). A new version arrives as a pull request
+# and the Tests workflow runs on it, so nothing changes until a green check says it is safe. The two artifact actions are grouped into ONE pull request, because the upload and
+# the download must stay on the same major version (a test enforces it, and a single bump of one of them would fail it for ever). The Python packages are not handled here:
+# they are locked in constraints-ci.txt and refreshed monthly by .github/workflows/refresh-lock.yml, after the whole suite has passed on the new versions.
 version: 2
 updates:
   - package-ecosystem: "github-actions"
@@ -8,3 +9,8 @@ updates:
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 3
+    groups:
+      artifacts:
+        patterns:
+          - "actions/upload-artifact"
+          - "actions/download-artifact"

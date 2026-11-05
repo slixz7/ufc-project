@@ -272,6 +272,10 @@ On your own computer: `python pipeline/backup.py dump` (writes to `data/backup`,
 
 Restore only loads an empty table, refuses a damaged file, and never deletes. A blank cell comes back as NULL. Backups made before the 2026-10 fix wrote a whole number in a column that also has blanks as `1.0`; restore accepts those, and new backups write `1`.
 
+## Dependabot pull requests (the versions of GitHub Actions)
+
+Once a week GitHub's Dependabot checks the actions the workflows use (checkout, setup-python, upload-artifact and download-artifact) and opens a pull request for each newer version; the two artifact actions come as ONE pull request, because their versions must match. The Tests workflow runs on it, and Dependabot's own "github_actions in / for ..." runs in the Actions tab are just it doing its job. **What to do:** if Tests is green, merge it the same way as the lock-refresh pull request (Merge pull request, Confirm merge); if it is red, open the failed run and send it to me instead of forcing it. Tests only exercises some of the workflows, so after merging a bump of an action the other workflows use, run each of them once by hand (Actions, the workflow, Run workflow): **Auto update** with "dry run" ticked, **Backup**, **Refresh lock** and **Live site check**, and look for green. If a pull request's checks predate a fix on `main`, comment `@dependabot rebase` on it and they run again. The rules the tests enforce: every action is pinned to a major version tag, the same major in every workflow, upload and download artifact on the same major, and no test names a literal version (`tests/test_dependabot_compat.py`). The first Dependabot checkout bump failed because one of my tests did exactly that; it was fixed by checking the rule instead of the version.
+
 ## Watching for silent failures
 
 Every other alert fires when a job FAILS. These cover what stops without failing: a schedule that GitHub paused, a dataset that stopped updating, a database that fills up, a site that breaks while every job stays green, a token that quietly expires. Each is optional and does nothing, harmlessly, until you set what it needs.
