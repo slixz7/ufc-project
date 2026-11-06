@@ -223,6 +223,39 @@ def publish(new_path: str, current: str, tests: str, date: str, out_lock: str, o
     return 0
 
 
+def pin_one(lock_text: str, spec: str, date: str, why: str) -> tuple[str, str]:
+    """(the new lock text, a sentence saying what was done). Adds or moves ONE exact pin and keeps the file sorted and well-formed; a line is added to the header saying what was added and why,
+    because the header otherwise claims a fully proven fresh environment. The next monthly refresh regenerates the whole file (and includes the package, once it is in a requirements file)."""
+    m = PIN.fullmatch((spec or "").strip())
+    if not m:
+        raise LockError(f"give an exact pin such as six==1.17.0, not {(spec or '')[:40]!r}")
+    name, version = m.groups()
+    check_valid_date(date)
+    note = " ".join(str(why or "").split())[:120]
+    if not note:
+        raise LockError("say why (--why): the header records the reason")
+    pins = parse_pins(lock_text)
+    key = norm(name)
+    if key in pins and pins[key][1] == version:
+        return lock_text, f"{pins[key][0]}=={version} is already pinned; nothing changed"
+    verb = "moved to" if key in pins else "added as"
+    pins[key] = (pins[key][0] if key in pins else name, version)
+    crlf = "\r\n" in lock_text
+    lines = lock_text.replace("\r\n", "\n").split("\n")
+    top = []
+    for line in lines:
+        if line.startswith("#") or (not line.strip() and top):
+            top.append(line)
+        else:
+            break
+    while top and not top[-1].strip():
+        top.pop()
+    top.append(f"# Pinned by hand on {date}: {pins[key][0]}=={version} ({note}). The next monthly refresh regenerates this file, including it.")
+    body = [f"{n}=={v}" for n, v in sorted(pins.values(), key=lambda p: norm(p[0]))]
+    out = "\n".join(top + body) + "\n"
+    return (out.replace("\n", "\r\n") if crlf else out), f"{pins[key][0]}=={version} {verb} a pin in the lock"
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="Rebuild constraints-ci.txt safely.")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -234,8 +267,18 @@ def main(argv: list[str] | None = None) -> int:
     c = sub.add_parser("publish")
     for opt in ("--new", "--current", "--tests", "--date", "--out-lock", "--out-summary"):
         c.add_argument(opt, required=True)
+    d = sub.add_parser("pin", help="add or move ONE exact pin in the lock, recording why in its header")
+    d.add_argument("spec", help="name==version, for example six==1.17.0")
+    d.add_argument("--date", required=True), d.add_argument("--why", required=True), d.add_argument("--lock", default="constraints-ci.txt")
     args = p.parse_args(argv)
     try:
+        if args.cmd == "pin":
+            text = open(args.lock, encoding="utf-8", newline="").read()
+            new, said = pin_one(text, args.spec, args.date, args.why)
+            if new != text:
+                open(args.lock, "w", encoding="utf-8", newline="").write(new)
+            print(said)
+            return 0
         if args.cmd == "plan":
             return plan(args.freeze, args.current, args.out, args.date)
         if args.cmd == "summarize-log":

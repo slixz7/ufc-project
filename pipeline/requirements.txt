@@ -7,4 +7,5 @@ psycopg2-binary>=2.9
 requests>=2.31
 beautifulsoup4>=4.12
 kaggle>=2.2
+six>=1.16            # the kaggle package imports it without declaring it; python-dateutil used to bring it in, until its 4.0 stopped (the daily job then failed with No module named 'six')
 pytest>=8.0

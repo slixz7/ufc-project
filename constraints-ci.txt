@@ -7,6 +7,7 @@
 # It is refreshed on the 1st of every month by .github/workflows/refresh-lock.yml: a brand-new Python 3.12 environment installs the newest versions the requirements
 # allow, the whole suite runs against them, and only if everything passes is a pull request opened for you to review and merge. Do not edit it by hand, and do not
 # regenerate it on another Python version or operating system.
+# Pinned by hand on 2026-11-06: six==1.17.0 (kaggle imports six without declaring it). The next monthly refresh regenerates this file, including it.
 altair==6.3.0
 anyio==4.16.0
 attrs==26.1.0
@@ -58,6 +59,7 @@ requests==2.34.2
 rpds-py==2026.9.1
 scikit-learn==1.9.1
 scipy==1.18.1
+six==1.17.0
 soupsieve==4.0.1
 SQLAlchemy==2.1.8
 starlette==1.10.0
