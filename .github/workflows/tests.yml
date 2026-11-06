@@ -34,7 +34,7 @@ jobs:
     env:
       TEST_PG_ADMIN_URL: postgresql+psycopg2://postgres:postgres@localhost:5432/postgres
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0                               # the whole history, so the credential scan below can read every commit
 

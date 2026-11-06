@@ -37,7 +37,7 @@ jobs:
     outputs:
       check_outcome: ${{ steps.check.outcome }}          # "failure" when the site check ran and failed; "skipped" when the browser could not even be set up
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
 
@@ -78,7 +78,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Tell the alert channel that the check failed
         env:
