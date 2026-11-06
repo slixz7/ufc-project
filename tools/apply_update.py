@@ -11,6 +11,8 @@ What it does, in this order:
      every file's SHA-256 and size match; every destination is inside this project folder (no absolute paths, no "..", never inside .git);
   2. only then writes. Each file it replaces is first copied to .update_backup/<date-time>/ (that folder is added to .gitignore), so nothing is lost;
   3. if a write fails part-way, it puts everything back as it was.
+A workflow file in the zip is first moved to the action versions the REST of your repository's workflows already use (see tools/align_actions.py), so applying it never undoes what
+Dependabot did; the zip's checksum is still checked against the original bytes, and what changed is printed as ALIGNED.
 It never deletes a file of yours, never runs anything from the zip, and never touches a file that is already identical. Afterwards run
 `python -m pytest -q tests` and look at `git status`.
 
@@ -28,6 +30,8 @@ import time
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
+
+import align_actions
 
 PROJECT = "ufc-project"
 FORMAT = 1
@@ -167,6 +171,13 @@ def _ensure_gitignore(root: Path) -> bool:
 def apply(zip_path: Path, root: Path = ROOT, dry_run: bool = False, expected_sha256: str | None = None, now: datetime | None = None, log=print, **limits) -> dict:
     root = Path(root)
     manifest, files = read_and_verify(zip_path, expected_sha256, root, **limits)
+    aligned: list[tuple[str, str, int, int]] = []
+    workflows = [rel for rel in files if re.fullmatch(r"\.github/workflows/[^/]+\.ya?ml", rel)]
+    if workflows:                                           # a workflow brought by the zip adopts the versions the rest of the repository already uses
+        wanted = align_actions.reference_majors(root, exclude=workflows)
+        for rel in workflows:
+            files[rel], changes = align_actions.align_bytes(files[rel], wanted)
+            aligned += [(rel, action, old, new) for action, old, new in changes]
     plan = {"new": [], "replace": [], "unchanged": []}
     for rel, data in files.items():
         dest = safe_destination(root, rel)
@@ -177,7 +188,8 @@ def apply(zip_path: Path, root: Path = ROOT, dry_run: bool = False, expected_sha
         else:
             plan["replace"].append(rel)
     stamp = (now or datetime.now()).strftime("%Y%m%d-%H%M%S")
-    result = {"new": plan["new"], "replaced": plan["replace"], "unchanged": plan["unchanged"], "backup_dir": None, "dry_run": dry_run, "note": manifest.get("note", "")}
+    result = {"new": plan["new"], "replaced": plan["replace"], "unchanged": plan["unchanged"], "backup_dir": None, "dry_run": dry_run, "note": manifest.get("note", ""),
+              "aligned": [a for a in aligned if a[0] in plan["new"] + plan["replace"]]}           # only for files that actually change
     if dry_run:
         return result
     backup = root / BACKUP_DIR / stamp
@@ -237,6 +249,8 @@ def main(argv=None, root: Path = ROOT) -> int:
         print(f"{verb}PLACED   {rel}  (replaced" + ("" if r["dry_run"] else f"; the old copy is in {BACKUP_DIR}/") + ")")
     for rel in r["unchanged"]:
         print(f"unchanged {rel}")
+    for rel, action, old, new in r["aligned"]:
+        print(f"{'WOULD ALIGN' if r['dry_run'] else 'ALIGNED    '} {rel}: {action} v{old} -> v{new} (to match the rest of the repository)")
     if r["dry_run"]:
         print("\nDry run: nothing was written.")
     else:

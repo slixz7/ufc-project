@@ -27,10 +27,15 @@ jobs:
   check:
     name: Open every page of the live site
     if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
-    runs-on: ubuntu-latest
+    # PINNED, not ubuntu-latest: that label moved to Ubuntu 26.04, which the pinned Playwright (tools/smoke-requirements.txt) does not support ("Playwright does not support
+    # chromium on ubuntu26.04-x64"), and a browser that cannot install is a monitor that cannot run. Playwright 1.56.0 names Ubuntu up to 24.04, and this workflow passed on 24.04 before
+    # the label moved. To move to a newer Ubuntu, change the runner and the Playwright version TOGETHER (a release that names the new Ubuntu), then run this workflow by hand.
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
       contents: read
+    outputs:
+      check_outcome: ${{ steps.check.outcome }}          # "failure" when the site check ran and failed; "skipped" when the browser could not even be set up
     steps:
       - uses: actions/checkout@v4
         with:
@@ -50,6 +55,7 @@ jobs:
           python -m playwright install --with-deps chromium
 
       - name: Open every page
+        id: check
         env:
           SITE_URL: ${{ vars.SITE_URL || 'https://ufc-predictor.streamlit.app/' }}
         run: python tools/smoke_test.py "$SITE_URL" --out smoke_out
@@ -77,4 +83,10 @@ jobs:
       - name: Tell the alert channel that the check failed
         env:
           ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}          # its own private channel, never the one the friends read; if it is not set, nothing is sent
-        run: python3 pipeline/notify_failure.py "Live site check"
+          CHECK_OUTCOME: ${{ needs.check.outputs.check_outcome }}
+        run: |
+          name="Live site check"
+          if [ "$CHECK_OUTCOME" != "failure" ]; then
+            name="Live site check (browser setup, not the site)"
+          fi
+          python3 pipeline/notify_failure.py "$name"

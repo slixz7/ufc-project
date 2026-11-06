@@ -22,7 +22,8 @@ def artifact_problems(upload: int, download: int) -> list[str]:
 
 
 def test_no_test_names_a_literal_action_version():
-    offenders = {p.name: LITERAL.findall(p.read_text(encoding="utf-8")) for p in (ROOT / "tests").glob("test_*.py") if p.name != Path(__file__).name}
+    exempt = {Path(__file__).name, "test_align_actions.py"}                                    # the second feeds INVENTED workflow text to the alignment tool; it never reads the repository's real versions
+    offenders = {p.name: LITERAL.findall(p.read_text(encoding="utf-8")) for p in (ROOT / "tests").glob("test_*.py") if p.name not in exempt}
     assert {k: v for k, v in offenders.items() if v} == {}, "a test that names a version rejects every future bump of that action"
 
 
@@ -32,7 +33,7 @@ def test_every_action_in_every_workflow_is_pinned_to_a_major_version_and_each_ac
         for action, major in re.findall(r"uses: ([\w.-]+/[\w.-]+)@v(\d+)\b", text):
             versions.setdefault(action, set()).add(major)
         assert not re.search(r"uses: [\w.-]+/[\w.-]+@(?!v\d+\b)\S+", text), f"{name} uses an action that is not pinned to a major version tag"
-    assert versions and {a: v for a, v in versions.items() if len(v) > 1} == {}, "a Dependabot pull request moves an action in every workflow at once, so they must agree"
+    assert versions and {a: v for a, v in versions.items() if len(v) > 1} == {}, "a Dependabot pull request moves an action in every workflow at once, so they must agree; run: python tools/align_actions.py"
     up, down = (int(next(iter(versions[f"actions/{a}-artifact"]))) for a in ("upload", "download"))
     assert artifact_problems(up, down) == []                                                                                    # neither is older than v4; they need not be equal
 
@@ -47,7 +48,7 @@ def test_dependabot_moves_the_two_artifact_actions_in_one_pull_request_and_says_
 def test_the_runbook_says_what_to_do_with_one():
     runbook = (ROOT / "docs" / "RUNBOOK.md").read_text(encoding="utf-8")
     for needle in ("## Dependabot pull requests (the versions of GitHub Actions)", "@dependabot rebase", "ONE pull request", "tests/test_dependabot_compat.py", "Run workflow", "dry run",
-                   "both on v4 or newer"):
+                   "both on v4 or newer", "tools/align_actions.py", "ALIGNED"):
         assert needle in runbook, needle
     assert "versions must match" not in runbook and "on the same major" not in runbook
 

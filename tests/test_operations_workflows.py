@@ -3,7 +3,12 @@ The workflows that carry the operations checks: the live site check (new), and t
 rules are the ones refresh-lock.yml has: nothing is spliced into a shell script, the job that runs a browser has no secrets, the alert is its own job, every action is pinned.
 """
 import re
+import shutil
+import subprocess
+import sys
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 WF = ROOT / ".github" / "workflows"
@@ -82,7 +87,9 @@ def test_it_waits_for_the_host_only_after_a_push_and_keeps_a_screenshot_only_whe
 def test_the_alert_is_its_own_job_with_the_only_secret_in_the_file():
     alert = jobs(SMOKE)["alert"]
     assert "needs: check" in alert and "if: failure()" in alert and re.search(r"^    permissions:\n      contents: read\n", alert, flags=re.M)
-    assert 'run: python3 pipeline/notify_failure.py "Live site check"' in alert and len(SECRET.findall(SMOKE)) == 1 and SECRET.search(alert)
+    assert 'python3 pipeline/notify_failure.py "$name"' in alert and len(SECRET.findall(SMOKE)) == 1 and SECRET.search(alert)
+    assert 'name="Live site check"' in alert and 'name="Live site check (browser setup, not the site)"' in alert                          # a monitor that could not start is not an outage
+    assert "CHECK_OUTCOME: ${{ needs.check.outputs.check_outcome }}" in alert and 'if [ "$CHECK_OUTCOME" != "failure" ]; then' in alert
     assert list(jobs(SMOKE)) == ["check", "alert"]
 
 
@@ -142,3 +149,39 @@ def test_the_documentation_describes_each_check_and_what_to_set():
                    "checks that pages WORK, not that their numbers are right", "I could not confirm", "**When the live site check fails.**", "failure.png"):
         assert needle in runbook, needle
     assert "**Silent failures.**" in readme and "smoke-test.yml" in readme and "five workflows" in readme
+
+
+# ---------------------------------------------------------------------------------------------- the browser needs an operating system its driver supports
+def test_the_browser_job_runs_on_a_pinned_ubuntu_that_the_pinned_playwright_supports_not_on_the_moving_latest_label():
+    check = jobs(SMOKE)["check"]
+    runner = re.search(r"^    runs-on: (\S+)\s*$", check, flags=re.M).group(1)
+    assert re.fullmatch(r"ubuntu-\d\d\.04", runner), "ubuntu-latest moved to a release the pinned Playwright could not install on; the job needs an explicit, supported runner"
+    pin = re.search(r"^playwright==([\d.]+)$", (ROOT / "tools" / "smoke-requirements.txt").read_text(encoding="utf-8"), flags=re.M).group(1)
+    KNOWN_GOOD = {("1.56.0", "ubuntu-24.04")}                                  # Playwright 1.56.0 names Ubuntu 20.04, 22.04 and 24.04 in its own registry; it passed here on 24.04
+    assert (pin, runner) in KNOWN_GOOD, f"Playwright {pin} on {runner} has not been confirmed: change both together, run the workflow by hand, then add the pair here"
+
+
+def test_the_pinned_runner_and_the_reason_for_it_are_written_next_to_it_and_in_the_runbook():
+    check = jobs(SMOKE)["check"]
+    assert "PINNED, not ubuntu-latest" in check and "26.04" in check and "change the runner and the Playwright version TOGETHER" in check
+    runbook = (ROOT / "docs" / "RUNBOOK.md").read_text(encoding="utf-8")
+    for needle in ("ubuntu-24.04", "26.04", "browser setup"):
+        assert needle in runbook, needle
+
+
+def test_the_check_job_reports_whether_the_site_check_ran_so_the_alert_can_tell_a_broken_site_from_a_broken_monitor():
+    check = jobs(SMOKE)["check"]
+    assert "check_outcome: ${{ steps.check.outcome }}" in check and re.search(r"- name: Open every page\n        id: check\n", check)
+    assert "\n  alert:" in SMOKE and "ubuntu-latest" in jobs(SMOKE)["alert"]                                                   # the alert job needs no browser, so the moving label is fine there
+
+
+@pytest.mark.skipif(sys.platform == "win32" or not shutil.which("bash"), reason="needs a real bash (the workflow's own shell); on Windows `bash` is often a WSL stub that prints UTF-16 errors")
+@pytest.mark.parametrize("outcome, expected", [("failure", "Live site check"), ("skipped", "Live site check (browser setup, not the site)"), ("", "Live site check (browser setup, not the site)"),
+                                               ("success", "Live site check (browser setup, not the site)")])
+def test_the_alert_script_chooses_its_name_by_what_happened_running_the_workflows_own_text(outcome, expected):
+    alert = jobs(SMOKE)["alert"]
+    script = scripts(alert)[-1]
+    assert 'python3 pipeline/notify_failure.py "$name"' in script
+    probe = script.replace('python3 pipeline/notify_failure.py "$name"', 'echo "NAME=$name"')                                    # the real logic, with the final call replaced by a print
+    out = subprocess.run(["bash", "-c", probe], env={"CHECK_OUTCOME": outcome, "PATH": "/usr/bin:/bin"}, capture_output=True, text=True, timeout=20)
+    assert out.returncode == 0 and out.stdout.strip() == f"NAME={expected}", out
