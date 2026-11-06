@@ -1,13 +1,12 @@
 # Exact package versions for the GitHub workflows (Python 3.12 on Linux). The workflows install with: pip install -r <requirements file> -c constraints-ci.txt
 #
-# PROVEN: on 2026-11-04 a brand-new environment installed pipeline/requirements.txt + app/requirements.txt + pyflakes, resolved to exactly these versions,
-# and the whole test suite passed against them (633 passed, 1 skipped). The requirements files keep only the minimum each package needs; this file says
+# PROVEN: on 2026-11-06 a brand-new environment installed pipeline/requirements.txt + app/requirements.txt + pyflakes, resolved to exactly these versions,
+# and the whole test suite passed against them (971 passed, 1 skipped). The requirements files keep only the minimum each package needs; this file says
 # which versions are actually used, so a new release of any package cannot change the daily job, the backup or the tests until this lock is refreshed.
 #
 # It is refreshed on the 1st of every month by .github/workflows/refresh-lock.yml: a brand-new Python 3.12 environment installs the newest versions the requirements
 # allow, the whole suite runs against them, and only if everything passes is a pull request opened for you to review and merge. Do not edit it by hand, and do not
 # regenerate it on another Python version or operating system.
-# Pinned by hand on 2026-11-06: six==1.17.0 (kaggle imports six without declaring it). The next monthly refresh regenerates this file, including it.
 altair==6.3.0
 anyio==4.16.0
 attrs==26.1.0
@@ -15,7 +14,7 @@ beautifulsoup4==4.15.0
 bleach==6.4.0
 certifi==2026.10.23
 charset-normalizer==3.5.2
-click==8.5.0
+click==8.5.1
 cloudpickle==3.1.2
 fastjsonschema==2.22.3
 h11==0.16.0
@@ -63,15 +62,15 @@ six==1.17.0
 soupsieve==4.0.1
 SQLAlchemy==2.1.8
 starlette==1.10.0
-streamlit==1.66.1
+streamlit==1.67.0
 text-unidecode==1.3
-threadpoolctl==3.7.0
+threadpoolctl==3.8.0
 tqdm==4.70.1
 traitlets==5.16.1
 typing_extensions==4.16.0
 tzdata==2026.6
 urllib3==2.8.0
 uvicorn==0.54.0
-watchdog==6.0.0
+watchdog==7.1.0
 webencodings==0.6.1
 websockets==17.4
