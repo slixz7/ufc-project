@@ -79,7 +79,9 @@ The market-informed model helps most where the statistics are thinnest:
 - **The probabilities are honest.** The calibration table below compares each stated confidence with how often those picks were right; the two track each other closely, and the most confident picks were not over-confident.
 - **The market and the model disagree on <!--n:dis_share-->25.5%<!--/n--> of fights.** In those fights the blended pick was right <!--n:dis_blend-->57.1%<!--/n--> of the time and the model-only pick <!--n:dis_model-->42.9%<!--/n-->, which is the clearest evidence the market adds information the statistics do not have.
 - **The backtest uses opening lines.** Live picks lock two days before an event using that day's line, so I expect results between the opening-line figure above and the closing-line figure (67.0% for the line alone, 67.6% blended), not better than either.
-- **One card is noise.** A card has 10 to 14 fights, so a single event can land anywhere. Across years with at least <!--n:year_min_fights-->200<!--/n--> scored fights, the model's yearly accuracy ranges from about <!--n:year_lo-->55%<!--/n--> to <!--n:year_hi-->65%<!--/n-->.
+- **One card is noise.**
+- - **Fights with no winner are left out.** Draws and no contests are not in the backtest or the training data (a disqualification has a winner, so it is included). A locked pick on a fight that ends that way is marked as having no result and counts neither as right nor as wrong, and the daily report lists any such pick so that a name mismatch cannot hide behind it.
+-  A card has 10 to 14 fights, so a single event can land anywhere. Across years with at least <!--n:year_min_fights-->200<!--/n--> scored fights, the model's yearly accuracy ranges from about <!--n:year_lo-->55%<!--/n--> to <!--n:year_hi-->65%<!--/n-->.
 
 **Calibration:** for the market-informed picks, how often they were right at each stated confidence.
 
