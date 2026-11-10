@@ -37,6 +37,7 @@ for sub in ("pipeline", "demo"):
     sys.path.insert(0, str(ROOT / sub))
 
 import auto_odds  # noqa: E402
+import hosted_db  # noqa: E402
 import bout_results  # noqa: E402
 import db_roles  # noqa: E402
 import game_admin  # noqa: E402
@@ -87,7 +88,7 @@ class BuildError(RuntimeError):
 def assert_safe_to_build(engine) -> None:
     """Only ever build into an empty database, or one this builder made before. Never into a real project database."""
     host = (engine.url.host or "").lower()
-    if "neon.tech" in host or "amazonaws.com" in host or "supabase" in host:
+    if hosted_db.looks_hosted(host):
         raise BuildError("That looks like a hosted database, not a scratch one. The demo builder will not touch it.")
     insp = sa.inspect(engine)
     tables = set(insp.get_table_names()) | set(insp.get_view_names())

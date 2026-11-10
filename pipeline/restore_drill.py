@@ -35,6 +35,7 @@ from pathlib import Path
 import sqlalchemy as sa
 
 import backup
+import hosted_db
 
 ROOT = Path(__file__).resolve().parent.parent
 SQL_DIR = ROOT / "sql"
@@ -42,7 +43,6 @@ SQL_DIR = ROOT / "sql"
 # small and harmless), they are not restored, and they do not fail the drill. Anything else without a setup step DOES fail it. Check the reason before adding one.
 LEGACY_TABLES = {"predictions": "the first version's table of predictions for a block of 2025 fights (nine columns, an older design of fight_predictions), checked against the real table on 2026-10-30; no code, SQL, page or documented dashboard uses it"}
 BASE_TABLES = ("fights", "fighter_fights")          # created by the loader from the Kaggle data; here, from the backup
-HOSTED = ("neon.tech", "supabase", "amazonaws.com", "render.com", "elephantsql", "azure.com", "googleapis.com")
 
 
 # ----------------------------------------------------------------------------------------------
@@ -232,7 +232,7 @@ def scratch_database():
 def assert_safe(engine) -> None:
     """Whatever database the drill is given, it must be empty and must not be a hosted one: a drill must not be able to touch anything real."""
     host = (engine.url.host or "").lower()
-    if any(h in host for h in HOSTED):
+    if hosted_db.looks_hosted(host):
         raise SystemExit(f"Refusing to run: {host} looks like a hosted database. The drill only runs on a throwaway database on this computer.")
     tables = sa.inspect(engine).get_table_names()
     if tables:
