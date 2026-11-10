@@ -39,7 +39,8 @@ import evidence_ui  # noqa: E402
 import insights_ui  # noqa: E402
 import title_rules  # noqa: E402
 
-st.set_page_config(page_title="UFC Fight Predictor", page_icon="🥊", layout="wide", initial_sidebar_state="collapsed")
+FAVICON = Path(__file__).resolve().parent / "assets" / "favicon.png"                      # the browser-tab icon: "UFC" in the site's own type and colours (see docs/RUNBOOK.md)
+st.set_page_config(page_title="UFC Fight Predictor", page_icon=str(FAVICON) if FAVICON.is_file() else None, layout="wide", initial_sidebar_state="collapsed")
 
 DISCLAIMER = ("Model predictions for fun, not betting advice. Over the long run the model is right roughly 6 times in 10, "
               "and it knows nothing about injuries, weight cuts or short-notice changes.")
