@@ -8,7 +8,7 @@ authors:
 repository-code: "https://github.com/slixz7/ufc-project"
 url: "https://ufc-predictor.streamlit.app/"
 license: MIT
-abstract: "Predicts UFC fights before they happen, locks every pick with a timestamp, explains it, and grades itself in public. Python, PostgreSQL, Streamlit, GitHub Actions. Honest evaluation: a backtest kept separate from the live record.
+abstract: "Predicts UFC fights before they happen, locks every pick with a timestamp, explains it, and grades itself in public. Python, PostgreSQL, Streamlit, GitHub Actions. Honest evaluation: a backtest kept separate from the live record."
 keywords:
   - ufc
   - sports analytics
