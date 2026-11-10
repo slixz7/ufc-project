@@ -34,7 +34,7 @@ def fresh_db(monkeypatch=None):
     eng = sa.create_engine(url)
     with eng.begin() as c:
         c.exec_driver_sql("CREATE TABLE fights (fight_url TEXT PRIMARY KEY, event_date DATE)")
-        c.exec_driver_sql("CREATE TABLE upcoming_picks_v2 (bout_id TEXT PRIMARY KEY, event_name TEXT, event_date DATE, status TEXT, graded_at TIMESTAMPTZ)")
+        c.exec_driver_sql("CREATE TABLE upcoming_picks_v2 (bout_id TEXT PRIMARY KEY, event_name TEXT, event_date DATE, status TEXT, graded_at TIMESTAMPTZ, fighter_a TEXT, fighter_b TEXT)")
     try:
         yield eng, url.render_as_string(hide_password=False)
     finally:
@@ -174,3 +174,99 @@ def test_the_watchdog_is_a_step_of_the_daily_job_between_the_health_check_and_th
     steps = src[src.index("steps = {"):src.index("chosen = ")]
     assert steps.index('"health"') < steps.index('"watchdog"') < steps.index('"readme"') and "watchdog.step_watchdog(engine, today, rep)" in steps
     assert '"health", "watchdog", "readme"' in src and "import watchdog" in src
+
+
+# ---------------------------------------------------------------------------------------------- picks that ended with no result
+def no_result(eng, rows):
+    """rows: (event_name, event_date, status, fighter_a, fighter_b)"""
+    with eng.begin() as c:
+        for i, (event, when, status, a, b) in enumerate(rows):
+            c.execute(sa.text("INSERT INTO upcoming_picks_v2 (bout_id, event_name, event_date, status, fighter_a, fighter_b) VALUES (:i, :e, :d, :s, :a, :b)"),
+                      {"i": f"nr{uuid.uuid4().hex[:10]}", "e": event, "d": when, "s": status, "a": a, "b": b})
+
+
+def nr(day, n=0):
+    return {"event_name": "UFC X", "event_date": date(2026, 10, day), "fighter_a": f"A{n}", "fighter_b": f"B{n}"}
+
+
+@needs_postgres
+def test_only_no_result_picks_inside_the_window_are_found_oldest_first_and_the_edges_are_exact():
+    with fresh_db() as (eng, url):
+        no_result(eng, [("later card", date(2026, 11, 1), "no_result", "Late A", "Late B"), ("edge card", date(2026, 10, 22), "no_result", "Edge A", "Edge B"),         # exactly 14 days ago: in
+                        ("old card", date(2026, 10, 21), "no_result", "Old A", "Old B"),                                                                              # 15 days ago: out
+                        ("locked card", date(2026, 11, 2), "locked", "L A", "L B"), ("called off", date(2026, 11, 2), "cancelled", "C A", "C B"),                    # not no_result: out
+                        ("future card", date(2026, 11, 20), "no_result", "F A", "F B")])                                                                              # not happened yet: out
+        rows = wd.no_result_picks(eng, TODAY)
+        assert [(r["event_name"], r["fighter_a"]) for r in rows] == [("edge card", "Edge A"), ("later card", "Late A")]
+        assert wd.no_result_picks(eng, TODAY, days=3) == [] and len(wd.no_result_picks(eng, TODAY, days=15)) == 3
+
+
+@needs_postgres
+def test_a_database_without_the_picks_table_has_no_no_result_picks_rather_than_an_error():
+    admin = sa.create_engine(ADMIN_URL, isolation_level="AUTOCOMMIT")
+    name = f"wd_{uuid.uuid4().hex[:8]}"
+    with admin.connect() as c:
+        c.exec_driver_sql(f"CREATE DATABASE {name}")
+    eng = sa.create_engine(sa.engine.make_url(ADMIN_URL).set(database=name))
+    try:
+        assert wd.no_result_picks(eng, TODAY) == []
+    finally:
+        eng.dispose()
+        with admin.connect() as c:
+            c.exec_driver_sql(f"DROP DATABASE IF EXISTS {name} WITH (FORCE)")
+
+
+def test_the_report_lines_say_none_or_name_the_fights_and_cap_the_list():
+    assert wd.no_result_lines([]) == ["Picks with no result (last 14 days): none"]
+    one = wd.no_result_lines([nr(30, 1)])
+    assert one[0].startswith("Picks with no result (last 14 days): 1. A draw, a no contest or a fight that fell through is the usual reason;") and "check them against the real result." in one[0]
+    assert one[1:] == ["  UFC X (2026-10-30): A1 vs. B1"]
+    many = wd.no_result_lines([nr(20 + i, i) for i in range(7)])
+    assert many[0].split(":")[1].strip().startswith("7.") and len(many) == 1 + wd.NO_RESULT_SHOWN + 1 and many[-1] == "  and 2 more"
+    assert wd.no_result_lines([{"event_name": None, "event_date": date(2026, 10, 30), "fighter_a": "X", "fighter_b": "Y"}])[1] == "  a card (2026-10-30): X vs. Y"
+
+
+@pytest.mark.parametrize("n, raised", [(0, False), (1, False), (2, False), (3, True), (4, True), (9, True)])
+def test_one_or_two_are_only_reported_and_three_or_more_need_attention(n, raised):
+    rows = [nr(10 + i, i) for i in range(n)]
+    problem = wd.no_result_problem(rows)
+    assert (problem is not None) == raised
+    if raised:
+        assert problem.startswith(f"{n} picks ended with no result in the last 14 days (A0 vs. B0 (2026-10-10); A1 vs. B1 (2026-10-11); A2 vs. B2 (2026-10-12)")
+        assert ("..." in problem) == (n > 3) and "this looks like results not being matched to picks" in problem and "A draw or a no contest is rare" in problem
+
+
+def test_the_thresholds_are_the_ones_the_documents_state():
+    assert (wd.NO_RESULT_DAYS, wd.NO_RESULT_ALERT_AT, wd.NO_RESULT_SHOWN) == (14, 3, 5)
+
+
+@needs_postgres
+def test_the_step_reports_the_picks_after_the_size_lines_and_raises_a_problem_only_from_three(monkeypatch):
+    with fresh_db() as (eng, url):
+        with eng.begin() as c:
+            c.exec_driver_sql("INSERT INTO fights VALUES ('f1', '2026-11-02')")
+        monkeypatch.setenv("DB_SIZE_LIMIT_MB", "100000")
+        no_result(eng, [("UFC 1", date(2026, 11, 1), "no_result", "Ann", "Bea"), ("UFC 1", date(2026, 11, 1), "no_result", "Cy", "Dee")])
+        rep = Report()
+        wd.step_watchdog(eng, TODAY, rep)
+        lines = rep.sections[0][1]
+        assert rep.attention == [] and lines[2].startswith("Database size:") and lines[4].startswith("Picks with no result (last 14 days): 2.")                      # after the size lines
+        assert lines[5:] == ["  UFC 1 (2026-11-01): Ann vs. Bea", "  UFC 1 (2026-11-01): Cy vs. Dee"]
+        no_result(eng, [("UFC 1", date(2026, 11, 1), "no_result", "Eve", "Fay")])
+        rep = Report()
+        wd.step_watchdog(eng, TODAY, rep)
+        assert len(rep.attention) == 1 and rep.attention[0].startswith("3 picks ended with no result in the last 14 days (Ann vs. Bea (2026-11-01); Cy vs. Dee (2026-11-01); Eve vs. Fay (2026-11-01))")
+
+
+@needs_postgres
+def test_the_daily_jobs_own_command_passes_with_two_and_fails_the_run_with_three(monkeypatch, capsys):
+    with fresh_db() as (eng, url):
+        monkeypatch.setenv("DATABASE_URL", url)
+        monkeypatch.setenv("DB_SIZE_LIMIT_MB", "100000")
+        monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+        no_result(eng, [("UFC 1", date(2026, 11, 1), "no_result", "Ann", "Bea"), ("UFC 1", date(2026, 11, 1), "no_result", "Cy", "Dee")])
+        assert auto_update.main(["watchdog", "--today", "2026-11-05"]) == 0
+        assert "Picks with no result (last 14 days): 2." in capsys.readouterr().out
+        no_result(eng, [("UFC 1", date(2026, 11, 1), "no_result", "Eve", "Fay")])
+        assert auto_update.main(["watchdog", "--today", "2026-11-05"]) == 3                                                                                          # "needs attention" is exit code 3
+        assert "## Needs your attention\n- 3 picks ended with no result" in capsys.readouterr().out

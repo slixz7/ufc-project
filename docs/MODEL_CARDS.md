@@ -2,10 +2,11 @@
 
 Four models make the predictions on the site. Each card says what the model predicts, what it is and is not for, what goes into it, how it is tested, where it is weak, and **when it would be retired**. The retirement rules are written here before the live results can tempt anyone to bend them, and `pipeline/model_health.py` applies them to the real record every day.
 
-**Three things hold for every model.**
+**Four things hold for every model.**
 
 - **A prediction is locked before its event and never changed.** The public log in `picks_log/` records each one, so the live record cannot be flattered after the fact.
 - **The backtest and the live record are different things.** The backtest predicts every past fight using only the fights before it, but it is generated after the results are known, and many choices were made while looking at the same history. Only the locked live record is clean, and it is still small.
+- **Fights with no winner are left out.** Draws and no contests are not in the backtest or the training data (a disqualification has a winner, so it is included). A locked pick on a fight that ends that way is marked as having no result and counts neither as right nor as wrong, and the daily report lists any such pick so that a name mismatch cannot hide behind it.
 - **The current numbers are not on this page.** They live in the README's results tables and on the site's Track record page, where they refresh themselves from the database. A number copied here would go stale.
 
 None of these models is betting advice, and the site never shows betting odds.
