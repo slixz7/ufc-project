@@ -69,13 +69,13 @@ def test_the_command_adds_it_once_prints_what_to_do_next_and_keeps_windows_line_
     raw = (root / "README.md").read_bytes().decode("utf-8")
     assert "\r\n" in raw and "\n" not in raw.replace("\r\n", "") and raw.count(ab.BULLET) == 1
     lines.clear()
-    assert ab.main([], root=root, out=lines.append) == 0 and lines == ["The bullet is already in README.md; nothing changed."]
+    assert ab.main([], root=root, out=lines.append) == 0 and lines == ["The bullet is already in README.md, on a line of its own; nothing changed."]
 
 
 def test_check_mode_reports_without_writing(tmp_path):
     root = project(tmp_path, GOOD)
     lines = []
-    assert ab.main(["--check"], root=root, out=lines.append) == 1 and "not in README.md yet" in lines[0]
+    assert ab.main(["--check"], root=root, out=lines.append) == 1 and "The bullet is missing from README.md" in lines[0]
     assert (root / "README.md").read_text(encoding="utf-8") == GOOD
     ab.main([], root=root, out=lambda m: None)
     assert ab.main(["--check"], root=root, out=lines.append) == 0
@@ -118,3 +118,66 @@ def test_it_needs_only_the_standard_library():
     tree = ast.parse((ROOT / "tools" / "add_readme_bullet.py").read_text(encoding="utf-8"))
     top = {a.name.split(".")[0] for n in tree.body if isinstance(n, ast.Import) for a in n.names} | {n.module.split(".")[0] for n in tree.body if isinstance(n, ast.ImportFrom) and n.module}
     assert top <= {"__future__", "sys", "pathlib"}, top
+
+
+# ---------------------------------------------------------------------------------------------- a bullet that is there but damaged
+CLEAN = ab.insert_bullet(GOOD)[0]                                            # GOOD with the bullet on its own line after the anchor
+CLEAN_LINES = CLEAN.split("\n")
+K = CLEAN_LINES.index(ab.BULLET)
+
+
+def glued(host_index):
+    """CLEAN, but with the bullet taken off its own line and stuck to the end of line `host_index` (what a missed Enter does)."""
+    lines = [l for i, l in enumerate(CLEAN_LINES) if i != K]
+    lines[host_index] = lines[host_index] + " " + ab.BULLET
+    return "\n".join(lines)
+
+
+@pytest.mark.parametrize("text, state", [
+    (GOOD, "missing"), (CLEAN, "ok"), (glued(K - 1), "damaged"), (CLEAN.replace(ab.BULLET, ab.BULLET + "  "), "damaged"), (CLEAN.replace(ab.BULLET, " " + ab.BULLET), "damaged"),
+    (CLEAN + ab.BULLET + "\n", "damaged"), (CLEAN.replace(ab.BULLET, ab.BULLET + "\n" + ab.BULLET), "damaged")])
+def test_the_state_of_the_bullet_is_ok_missing_or_damaged(text, state):
+    assert ab.bullet_state(text) == state
+
+
+@pytest.mark.parametrize("name, damaged", [
+    ("glued to the end of the anchor line", glued(K - 1)), ("glued to the end of the bullet before it", glued(K - 2)), ("glued to the last bullet", glued(K)),
+    ("there twice on their own lines", CLEAN.replace(ab.BULLET, ab.BULLET + "\n" + ab.BULLET)), ("with trailing spaces", CLEAN.replace(ab.BULLET, ab.BULLET + "   ")),
+    ("with a leading space", CLEAN.replace(ab.BULLET, "  " + ab.BULLET)),
+    ("glued with two spaces", glued(K - 1).replace(" " + ab.BULLET, "  " + ab.BULLET)), ("glued with a tab", glued(K - 1).replace(" " + ab.BULLET, "\t" + ab.BULLET)),
+    ("glued with no space at all", glued(K - 1).replace(" " + ab.BULLET, ab.BULLET)), ("one proper copy and one glued on", glued(K - 1).replace("\n## Next section", "\n" + ab.BULLET + "\n## Next section"))])
+def test_every_damaged_form_is_repaired_to_exactly_the_clean_text(name, damaged):
+    repaired, changed = ab.insert_bullet(damaged)
+    assert changed and repaired == CLEAN, name                                                                                  # the host line is restored exactly, and the bullet sits once after the anchor
+    assert ab.insert_bullet(repaired) == (repaired, False)                                                                      # and a second run changes nothing
+
+
+def test_the_command_says_it_repaired_and_keeps_windows_line_endings(tmp_path):
+    root = project(tmp_path, glued(K - 1), crlf=True)
+    lines = []
+    assert ab.main([], root=root, out=lines.append) == 0 and lines[0].startswith("Repaired the damaged bullet in README.md. Check it with: git diff README.md")
+    raw = (root / "README.md").read_bytes().decode("utf-8")
+    assert raw == CLEAN.replace("\n", "\r\n")
+    lines.clear()
+    assert ab.main([], root=root, out=lines.append) == 0 and lines == ["The bullet is already in README.md, on a line of its own; nothing changed."]
+
+
+def test_check_mode_calls_a_damaged_bullet_damaged_and_writes_nothing(tmp_path):
+    root = project(tmp_path, glued(K - 1))
+    lines = []
+    assert ab.main(["--check"], root=root, out=lines.append) == 1 and "in README.md but damaged" in lines[0]
+    assert (root / "README.md").read_text(encoding="utf-8") == glued(K - 1)
+
+
+def test_the_real_readme_in_every_damaged_form_is_repaired_to_exactly_itself():
+    real = (ROOT / "README.md").read_text(encoding="utf-8")
+    lines = real.split("\n")
+    k = lines.index(ab.BULLET)
+    without = [l for i, l in enumerate(lines) if i != k]
+    forms = {"glued to the anchor line": without[:k - 1] + [without[k - 1] + " " + ab.BULLET] + without[k:],
+             "glued to the bullet before the anchor": without[:k - 2] + [without[k - 2] + " " + ab.BULLET] + without[k - 1:]}
+    for name, damaged in forms.items():
+        assert ab.bullet_state("\n".join(damaged)) == "damaged", name
+        assert ab.insert_bullet("\n".join(damaged))[0] == real, name
+    assert ab.insert_bullet(real.replace(ab.BULLET, ab.BULLET + "   "))[0] == real
+    assert ab.insert_bullet(real.replace(ab.BULLET, ab.BULLET + "\n" + ab.BULLET))[0] == real

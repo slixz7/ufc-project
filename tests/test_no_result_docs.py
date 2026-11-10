@@ -19,6 +19,7 @@ BULLET = ("- **Fights with no winner are left out.** Draws and no contests are n
 
 def test_the_readme_has_the_bullet_in_its_how_to_read_this_honestly_list():
     assert BULLET in README, "add the bullet to README.md by running:  python tools/add_readme_bullet.py   (do not paste text over the README by hand)"
+    assert README.split("\n").count(BULLET) == 1 and README.count(BULLET) == 1, "the bullet must be on a line of its own, once; repair it with:  python tools/add_readme_bullet.py"
     start = README.index("**How to read this honestly**")
     end = README.index("\n## ", start)
     assert start < README.index(BULLET) < end and README.index("- **One card is noise.**") < README.index(BULLET)
