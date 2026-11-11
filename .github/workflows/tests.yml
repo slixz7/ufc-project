@@ -64,3 +64,28 @@ jobs:
         env:
           UFC_EXPECT_LOCKED: "1"                  # also checks that the installed versions are exactly the locked ones
         run: python -m pytest -q tests
+
+  # The scheduled daily job installs ONLY the pipeline's packages and runs the suite before it writes anything, so a test that needs anything else (the web app's Streamlit, which brings the image
+  # library Pillow) would pass above and then stop the job the next morning. This runs the suite in exactly that environment on every push, so that shows up here instead.
+  daily-environment:
+    name: The daily job's own environment (pipeline packages only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            pipeline/requirements.txt
+            constraints-ci.txt
+
+      - name: Install packages (only what the daily job installs)
+        run: pip install -r pipeline/requirements.txt -c constraints-ci.txt
+
+      - name: Offline tests (what the scheduled job runs before it writes anything)
+        env:
+          UFC_EXPECT_LOCKED: "1"
+        run: python -m pytest -q tests

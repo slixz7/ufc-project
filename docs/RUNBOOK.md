@@ -276,6 +276,10 @@ On your own computer: `python pipeline/backup.py dump` (writes to `data/backup`,
 
 Restore only loads an empty table, refuses a damaged file, and never deletes. A blank cell comes back as NULL. Backups made before the 2026-10 fix wrote a whole number in a column that also has blanks as `1.0`; restore accepts those, and new backups write `1`.
 
+## Two test environments
+
+The scheduled daily job installs **only** `pipeline/requirements.txt` and runs the whole test suite before it writes anything; the **Tests** workflow installs the web app's packages as well (so the site's tests can run) and has a Postgres server. A test that needs a package the daily job does not have (for example Pillow, which Streamlit brings in) would pass in Tests and then stop the daily job the next morning, which is what happened once with the tab-icon tests (`No module named 'PIL'`). So the Tests workflow has a second job, **daily-environment**, that installs exactly what the daily job installs and runs the same command, and `tests/test_two_environments.py` keeps the two identical. **The rule:** a test that needs a package outside `pipeline/requirements.txt` must skip when it is missing (`pytest.importorskip`), never crash. If the daily job ever fails at "Offline tests", look at the failing test names: a `ModuleNotFoundError` means a test needs a package the daily job lacks.
+
 ## Packages the code needs but does not declare
 
 On 2026-11-06 the daily job started failing with `Kaggle access: FAILED: No module named 'six'`. The `kaggle` package imports `six` in its own code but does not list it as a dependency; it had worked only because `python-dateutil` happened to depend on `six`. When the monthly lock refresh moved `python-dateutil` to 4.0, which no longer does, `six` stopped being installed. The refresh's tests all passed, because nothing tested the Kaggle client (it needs credentials), so a broken environment looked healthy.

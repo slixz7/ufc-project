@@ -1,10 +1,15 @@
 """
 The browser-tab icon: "UFC" in the site's own typeface and colours (not an emoji), passed to Streamlit as an image file. These checks keep the file a small, square, on-palette PNG, and keep an emoji
 from being put back.
+
+The daily job installs only the pipeline's packages, which do NOT include the image library Pillow (the web app's Streamlit brings it in). So the checks that need Pillow skip when it is missing, and the
+only one that guards the icon's format everywhere (it has an alpha channel) reads the PNG header with the standard library. A test that needs a package the daily job lacks must skip, never crash.
 """
 import re
 import struct
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 ICON = ROOT / "app" / "assets" / "favicon.png"
@@ -23,15 +28,21 @@ def test_the_icon_is_a_small_square_png_big_enough_for_high_density_screens():
     assert len(data) < 30_000, len(data)                                                                                     # it is sent to every visitor
 
 
-def test_the_icon_has_an_alpha_channel_so_streamlit_serves_the_png_instead_of_re_encoding_it_as_a_blurry_jpeg():
-    from PIL import Image
+def test_the_icon_is_saved_with_an_alpha_channel_so_streamlit_serves_the_png_instead_of_re_encoding_it_as_a_blurry_jpeg():
+    data = ICON.read_bytes()
+    assert data[:8] == b"\x89PNG\r\n\x1a\n"
+    bit_depth, colour_type = struct.unpack(">BB", data[24:26])                                                                  # the PNG header, read without any image library
+    assert (bit_depth, colour_type) == (8, 6), "colour type 6 is RGBA: an opaque RGB file is turned into a JPEG by Streamlit (found by asking a real browser)"
+
+
+def test_the_alpha_channel_is_fully_opaque_a_solid_tile_with_no_transparent_corners():
+    Image = pytest.importorskip("PIL.Image", reason="Pillow is installed with the web app, not in the daily job")
     im = Image.open(ICON)
-    assert im.mode == "RGBA"                                                                                                   # found by asking a real browser: an opaque RGB file is turned into a JPEG
-    assert im.getchannel("A").getextrema() == (255, 255)                                                                       # ...and it is fully opaque: a solid tile, no transparent corners
+    assert im.mode == "RGBA" and im.getchannel("A").getextrema() == (255, 255)
 
 
 def test_the_icon_uses_the_sites_own_ink_and_accent_and_is_not_blank():
-    from PIL import Image
+    Image = pytest.importorskip("PIL.Image", reason="Pillow is installed with the web app, not in the daily job")
     css = {k: v for k, v in re.findall(r"--(ink|accent|paper):(#[0-9a-fA-F]{6});", APP)}
     assert set(css) == {"ink", "accent", "paper"}
     to_rgb = lambda hx: tuple(int(hx[i:i + 2], 16) for i in (1, 3, 5))                                                         # noqa: E731
