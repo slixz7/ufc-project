@@ -14,6 +14,11 @@ and reaches the private alert channel, like any other):
     ended that way in the last 14 days (the event and the fighters, so that a person can check the real result), and three or more in that time fail the run: a draw or a no contest is rare, so
     that many points at results not being matched to picks.
 
+  * A DEBUT ALIAS THAT WENT STALE. A line `Name,NEW` in upcoming/aliases.csv tells the daily job "this fighter has no UFC history". That is right on the day of a debut, and wrong from
+    the moment the fight reaches the data: every later pick for that fighter would ignore the fights he has had. Nothing fails when that happens, so each run checks every NEW line
+    against the data and raises a problem for any whose exact name now belongs to exactly one fighter there. (A name shared by two fighters is left alone: that NEW was a deliberate
+    choice. A different person who happens to share a name with one old fighter would be reported wrongly, which is rare; the message says to keep the line in that case.)
+
 Two more quiet failures are covered outside the database: heartbeat.py (the job did not run at all) and token_expiry.py (the backup token is about to expire).
 """
 from __future__ import annotations
@@ -21,16 +26,19 @@ from __future__ import annotations
 import logging
 import os
 from datetime import date
+from pathlib import Path
 
 import sqlalchemy as sa
 
 log = logging.getLogger("watchdog")
+ALIASES_PATH = Path(__file__).resolve().parents[1] / "upcoming" / "aliases.csv"
 STALE_AFTER_DAYS = 5                 # results usually arrive within a day or two; five days with none is a real problem
 DEFAULT_LIMIT_MB = 500
 WARN_PERCENT = 80
 NO_RESULT_DAYS = 14                  # how far back the report looks for picks that ended with no result
 NO_RESULT_ALERT_AT = 3               # this many in that time is more likely a matching problem than rare outcomes, so it needs attention
 NO_RESULT_SHOWN = 5                  # how many to name in the report
+STALE_NEW_NAMED = 3                  # how many stale debut aliases the raised problem names
 
 
 def stale_events(engine, today: date, days: int = STALE_AFTER_DAYS) -> list[dict]:
@@ -83,6 +91,60 @@ def no_result_problem(rows: list[dict], days: int = NO_RESULT_DAYS) -> str | Non
     names = "; ".join(f"{r['fighter_a']} vs. {r['fighter_b']} ({r['event_date']:%Y-%m-%d})" for r in rows[:3])
     return (f"{len(rows)} picks ended with no result in the last {days} days ({names}{'...' if len(rows) > 3 else ''}). A draw or a no contest is rare, so this looks like results "
             "not being matched to picks: check those fights' real results and the fighters' names.")
+
+
+def stale_new_aliases(aliases: dict, idx) -> tuple[int, list[dict]]:
+    """(how many NEW lines there are, the stale ones). `aliases` maps a normalised card name to its target (as upcoming.load_aliases returns it) and `idx` is upcoming.fighter_index's table
+    (columns norm, fighter_name, n_fights, last_fight, weight_class). A NEW line is stale when its name is now exactly one fighter in the data. Two or more fighters with the name means the
+    line is a deliberate choice for a debutant who shares it, so it is left alone."""
+    new_names = sorted(key for key, target in aliases.items() if str(target).strip().upper() == "NEW")
+    stale = []
+    for key in new_names:
+        hits = idx[idx["norm"] == key]
+        if len(hits) == 1:
+            r = hits.iloc[0]
+            stale.append({"name": str(r["fighter_name"]), "fights": int(r["n_fights"]), "last_fight": r["last_fight"], "weight_class": r["weight_class"]})
+    return len(new_names), stale
+
+
+def stale_new_lines(total: int, stale: list[dict]) -> list[str]:
+    """The report lines: one when all is well, otherwise a heading and each stale name with what the data now holds about him."""
+    if total == 0:
+        return []
+    if not stale:
+        return [f"Debut aliases (NEW) in upcoming/aliases.csv: {total}, none of them in the data yet (still correct)"]
+    lines = [f"Debut aliases (NEW) in upcoming/aliases.csv: {total}, of which {len(stale)} now match a fighter in the data and should be removed"]
+    for s in stale[:NO_RESULT_SHOWN]:
+        last = s["last_fight"]
+        when = f", last fought {last:%b} {last.day}, {last:%Y}" if hasattr(last, "strftime") else ""
+        lines.append(f"  {s['name']}: {s['fights']} UFC fight{'s' if s['fights'] != 1 else ''} in the data{when}")
+    if len(stale) > NO_RESULT_SHOWN:
+        lines.append(f"  and {len(stale) - NO_RESULT_SHOWN} more")
+    return lines
+
+
+def stale_new_problem(stale: list[dict]) -> str | None:
+    """A problem to raise for any stale debut alias, naming the first few and saying exactly what to do."""
+    if not stale:
+        return None
+    names = ", ".join(s["name"] for s in stale[:STALE_NEW_NAMED]) + ("..." if len(stale) > STALE_NEW_NAMED else "")
+    many = len(stale) != 1
+    return (f"upcoming/aliases.csv still marks {names} as {'UFC debuts' if many else 'a UFC debut'} ('NEW'), but the data now has "
+            f"{'fighters' if many else 'a fighter'} with {'those exact names' if many else 'that exact name'}, so {'their' if many else 'his or her'} fights are being ignored in every new pick. "
+            f"If {'they are the same people' if many else 'it is the same person'}, delete {'those lines' if many else 'that line'} from upcoming/aliases.csv and push. "
+            "If it is a different person who only shares the name, keep the line (this check has no way to be silenced yet, so it will keep reporting it).")
+
+
+def new_alias_check(engine, aliases_path: Path | None = None) -> tuple[int, list[dict]]:
+    """Run the stale-debut-alias check against the database. (0, []) when there is nothing to check: no aliases file, or the fight tables do not exist yet."""
+    path = Path(aliases_path) if aliases_path else ALIASES_PATH
+    if not path.is_file():
+        return 0, []
+    inspector = sa.inspect(engine)
+    if not (inspector.has_table("fights") and inspector.has_table("fighter_fights")):
+        return 0, []
+    import upcoming                                   # imported here: it brings in scikit-learn, which the pure functions above do not need
+    return stale_new_aliases(upcoming.load_aliases(path), upcoming.fighter_index(engine))
 
 
 def newest_result(engine) -> date | None:
@@ -150,6 +212,15 @@ def step_watchdog(engine, today: date, rep) -> None:
     no_result = no_result_picks(engine, today)
     lines += no_result_lines(no_result)
     problem = no_result_problem(no_result)
+    if problem:
+        rep.need(problem)
+    try:
+        total_new, stale_new = new_alias_check(engine)
+    except Exception as exc:                          # a check that cannot run must never turn a good run into a failed one; it says so instead
+        total_new, stale_new = 0, []
+        lines.append(f"The debut-alias check could not run ({type(exc).__name__}).")
+    lines += stale_new_lines(total_new, stale_new)
+    problem = stale_new_problem(stale_new)
     if problem:
         rep.need(problem)
     rep.add("Watchdog", *lines)
